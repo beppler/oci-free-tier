@@ -1,0 +1,8 @@
+# The working tree lives on a Windows host mounted into a Linux container, which
+# otherwise leaves every file CRLF against an LF index. Normalize on the way in and
+# check out LF everywhere, on both OSes; Terraform and PowerShell 7 handle LF fine.
+* text=auto eol=lf
+
+# Never touch these
+*.pem  -text
+*.exe  binary

@@ -9,7 +9,7 @@ A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with Terrafo
 - **State tracking**: Terraform remembers exactly what it created (`terraform.tfstate`) and can tell you what's changed or drifted, so you always know what's actually deployed.
 - **Idempotent by default**: `terraform apply` only changes what's different from the last run - safe to run repeatedly without worrying about duplicating resources.
 - **One place to see everything**: a handful of `.tf` files describe the whole stack, with resources referencing each other directly instead of you tracking OCIDs by hand.
-- **Trade-off**: less control over retry behavior - Ampere A1 capacity errors ("Out of capacity") aren't retried automatically by Terraform (more on this in section 12).
+- **Trade-off**: less control over retry behavior - Ampere A1 capacity errors ("Out of capacity") aren't retried automatically by Terraform (more on this in section 13).
 
 ## 2. Install Terraform and set up the OCI provider
 
@@ -88,370 +88,110 @@ Keep these somewhere safe (a password manager, not committed to git) - they go i
 
 ```text
 oci-infrastructure/
-├── providers.tf
-├── variables.tf
-├── network.tf
-├── compute.tf
-├── outputs.tf
+├── providers.tf           # provider pin, credentials, path handling
+├── variables.tf           # every input and its default
+├── network.tf             # VCN, IGW, route table, security list, subnet
+├── compute.tf             # image lookup, A1 instance, reserved IPs
+├── outputs.tf             # what apply prints when it finishes
+├── .gitattributes         # normalizes line endings to LF
 └── terraform.tfvars       # your actual values - keep this out of git
 ```
 
+Sections 5-9 below describe what each file contains and why, rather than reproducing it. The files themselves are in this repository and are the authoritative version - read them alongside the descriptions when you want the exact HCL.
+
 ## 5. `providers.tf`
 
-```hcl
-terraform {
-  required_providers {
-    oci = {
-      source  = "oracle/oci"
-      version = "~> 7.0"   # 5.x predates the `lifetime` argument on oci_core_ipv6 (reserved IPv6)
-    }
-  }
-}
+Pins the provider and normalizes the two filesystem paths Terraform needs.
 
-locals {
-  # pathexpand() resolves ~ to the actual home directory at apply time both on Linux and Windows
-  private_key_path = pathexpand(var.private_key_path)
-  ssh_public_key_path = pathexpand(var.ssh_public_key_path)
-}
+- **`terraform.required_providers`** - pins `oracle/oci` to `~> 7.0`. The 5.x line predates the `lifetime` argument on `oci_core_ipv6`, so reserved IPv6 (section 8) won't work on it.
+- **`locals`** - runs both `var.private_key_path` and `var.ssh_public_key_path` through `pathexpand()`, which resolves a leading `~` to the real home directory at apply time on Linux *and* Windows. This is why `~/...` paths in `terraform.tfvars` need no OS-specific quoting.
+- **`provider "oci"`** - wires tenancy, user, fingerprint, private key, and region straight from variables.
 
-provider "oci" {
-  tenancy_ocid     = var.tenancy_ocid
-  user_ocid        = var.user_ocid
-  fingerprint      = var.fingerprint
-  private_key_path = local.private_key_path
-  region           = var.region
-}
-```
-
-This is self-contained - it doesn't read `~/.oci/config` at all, so it works the same whether or not the OCI CLI is installed or configured on the machine.
+The provider block is fully self-contained: it never reads `~/.oci/config`, so it behaves identically whether or not the OCI CLI is installed or configured on the machine.
 
 ## 6. `variables.tf`
 
-```hcl
-variable "tenancy_ocid" {
-  type = string
-}
+Every input the configuration takes. Six have no default and must be supplied in `terraform.tfvars`; the rest are tuned for the Always Free tier and only need changing if you want something different.
 
-variable "user_ocid" {
-  type = string
-}
+**Required - no defaults:**
 
-variable "fingerprint" {
-  type = string
-}
+| Variable | Type | Purpose |
+| --- | --- | --- |
+| `tenancy_ocid` | string | Tenancy OCID (section 3) |
+| `user_ocid` | string | User OCID (section 3) |
+| `fingerprint` | string | API key fingerprint (section 3) |
+| `private_key_path` | string | Path to the API signing private key; `~` is expanded |
+| `compartment_id` | string | Compartment the resources are created in |
+| `availability_domain` | string | Target AD, e.g. `tWkk:SA-SAOPAULO-1-AD-1` |
+| `region` | string | `sa-saopaulo-1` | OCI region |
 
-variable "private_key_path" {
-  type = string
-}
+**Optional - with defaults:**
 
-variable "compartment_id" {
-  type = string
-}
+| Variable | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `vcn_cidr` | string | `10.0.0.0/24` | VCN CIDR; the subnet reuses it verbatim |
+| `vcn_name` | string | `vcn-free-public` | VCN display name; also prefixes the IGW/route table/security list names |
+| `subnet_name` | string | `subnet-free-public` | Subnet display name |
+| `enable_ipv6` | bool | `true` | Adds IPv6 to the VCN, subnet, routes, and security rules |
+| `vcn_dns_label` | string | `vcnfree` | VCN DNS label; empty string disables DNS |
+| `subnet_dns_label` | string | `subnetfree` | Subnet DNS label; empty string disables DNS |
+| `instance_display_name` | string | `vm-ampere-free` | Instance name, `hostname_label`, and reserved-IP name prefix |
+| `ocpus` | number | `2` | OCPUs - the Always Free ceiling |
+| `memory_in_gbs` | number | `12` | RAM - the Always Free ceiling |
+| `boot_volume_size_gb` | number | `50` | Boot volume size |
+| `ssh_public_key_path` | string | `~/.ssh/id_rsa.pub` | SSH public key injected into the instance; `~` is expanded |
+| `reserve_public_ip` | bool | `true` | Reserve the public IPv4 (and IPv6) instead of letting OCI assign ephemeral ones |
 
-variable "region" {
-  type    = string
-  default = "sa-saopaulo-1"
-}
-
-variable "availability_domain" {
-  type = string
-}
-
-variable "vcn_cidr" {
-  type    = string
-  default = "10.0.0.0/24"
-}
-
-variable "vcn_name" {
-  type    = string
-  default = "vcn-free-public"
-}
-
-variable "subnet_name" {
-  type    = string
-  default = "subnet-free-public"
-}
-
-variable "enable_ipv6" {
-  type    = bool
-  default = false
-}
-
-variable "vcn_dns_label" {
-  type    = string
-  default = "vcnfree"
-}
-
-variable "subnet_dns_label" {
-  type    = string
-  default = "subnetfree"
-}
-
-variable "instance_display_name" {
-  type    = string
-  default = "vm-ampere-free"
-}
-
-variable "ocpus" {
-  type    = number
-  default = 2
-}
-
-variable "memory_in_gbs" {
-  type    = number
-  default = 12
-}
-
-variable "boot_volume_size_gb" {
-  type    = number
-  default = 50
-}
-
-variable "ssh_public_key_path" {
-  type    = string
-  default = "~/.ssh/id_rsa.pub"
-}
-
-variable "reserve_public_ip" {
-  type    = bool
-  default = true
-}
-```
+`ocpus` and `memory_in_gbs` sit exactly on the Always Free cap of 2 OCPU / 12 GB **per tenancy**. Raising either one, or running a second A1 instance alongside this one, takes you off the free tier.
 
 ## 7. `network.tf`
 
-This creates the VCN, internet gateway, route table, security list, and public subnet.
+Creates the VCN, internet gateway, route table, security list, and public subnet. IPv6 support is threaded through all five via `dynamic` blocks keyed on `var.enable_ipv6`, so flipping that one variable adds or removes the whole IPv6 path.
 
-```hcl
-resource "oci_core_vcn" "this" {
-  compartment_id = var.compartment_id
-  cidr_block     = var.vcn_cidr
-  display_name   = var.vcn_name
-  dns_label      = var.vcn_dns_label != "" ? var.vcn_dns_label : null
-  is_ipv6enabled = var.enable_ipv6
-}
+- **`oci_core_vcn.this`** - the VCN, at `var.vcn_cidr`, with `is_ipv6enabled` following `enable_ipv6`. A blank `vcn_dns_label` is converted to `null` so DNS can be turned off cleanly.
+- **`oci_core_internet_gateway.this`** - an enabled IGW named `<vcn_name>-igw`.
+- **`oci_core_route_table.this`** - a default route `0.0.0.0/0` to the IGW, plus a `::/0` rule added dynamically when IPv6 is on.
+- **`oci_core_security_list.this`** - egress open to everything (`0.0.0.0/0`, plus `::/0` when enabled). Ingress opens SSH/HTTP/HTTPS (22, 80, 443) over TCP and ICMP echo for ping, and the same set is emitted again for IPv6 - protocol `58` (ICMPv6) with `type = 128` instead of protocol `1` / `type = 8`.
+- **`oci_core_subnet.this`** - a public subnet (`prohibit_public_ip_on_vnic = false`) that reuses the full VCN CIDR. Its IPv6 range is carved out with `cidrsubnet(oci_core_vcn.this.ipv6cidr_blocks[0], 8, 0)`, giving the first /64 of the VCN's assigned /56.
 
-resource "oci_core_internet_gateway" "this" {
-  compartment_id = var.compartment_id
-  vcn_id         = oci_core_vcn.this.id
-  display_name   = "${var.vcn_name}-igw"
-  enabled        = true
-}
-
-resource "oci_core_route_table" "this" {
-  compartment_id = var.compartment_id
-  vcn_id         = oci_core_vcn.this.id
-  display_name   = "${var.vcn_name}-rt"
-
-  route_rules {
-    destination       = "0.0.0.0/0"
-    destination_type  = "CIDR_BLOCK"
-    network_entity_id = oci_core_internet_gateway.this.id
-  }
-
-  dynamic "route_rules" {
-    for_each = var.enable_ipv6 ? [1] : []
-    content {
-      destination       = "::/0"
-      destination_type  = "CIDR_BLOCK"
-      network_entity_id = oci_core_internet_gateway.this.id
-    }
-  }
-}
-
-resource "oci_core_security_list" "this" {
-  compartment_id = var.compartment_id
-  vcn_id         = oci_core_vcn.this.id
-  display_name   = "${var.vcn_name}-seclist"
-
-  egress_security_rules {
-    destination = "0.0.0.0/0"
-    protocol    = "all"
-  }
-
-  dynamic "egress_security_rules" {
-    for_each = var.enable_ipv6 ? [1] : []
-    content {
-      destination      = "::/0"
-      destination_type = "CIDR_BLOCK"
-      protocol         = "all"
-    }
-  }
-
-  # TCP ports: SSH, HTTP, HTTPS - IPv4
-  dynamic "ingress_security_rules" {
-    for_each = { ssh = 22, http = 80, https = 443 }
-    content {
-      source   = "0.0.0.0/0"
-      protocol = "6"
-      tcp_options {
-        min = ingress_security_rules.value
-        max = ingress_security_rules.value
-      }
-    }
-  }
-
-  # ICMP (ping) - IPv4
-  ingress_security_rules {
-    source   = "0.0.0.0/0"
-    protocol = "1"
-    icmp_options {
-      type = 8
-    }
-  }
-
-  # Same set again for IPv6, only if enabled
-  dynamic "ingress_security_rules" {
-    for_each = var.enable_ipv6 ? { ssh = 22, http = 80, https = 443 } : {}
-    content {
-      source      = "::/0"
-      source_type = "CIDR_BLOCK"
-      protocol    = "6"
-      tcp_options {
-        min = ingress_security_rules.value
-        max = ingress_security_rules.value
-      }
-    }
-  }
-  dynamic "ingress_security_rules" {
-    for_each = var.enable_ipv6 ? [1] : []
-    content {
-      source      = "::/0"
-      source_type = "CIDR_BLOCK"
-      protocol    = "58"
-      icmp_options {
-        type = 128
-      }
-    }
-  }
-}
-
-resource "oci_core_subnet" "this" {
-  compartment_id             = var.compartment_id
-  vcn_id                     = oci_core_vcn.this.id
-  cidr_block                 = var.vcn_cidr
-  ipv6cidr_block              = var.enable_ipv6 ? cidrsubnet(oci_core_vcn.this.ipv6cidr_blocks[0], 8, 0) : null
-  display_name                = var.subnet_name
-  dns_label                   = var.subnet_dns_label != "" ? var.subnet_dns_label : null
-  route_table_id               = oci_core_route_table.this.id
-  security_list_ids            = [oci_core_security_list.this.id]
-  prohibit_public_ip_on_vnic   = false
-}
-```
+The TCP ingress rules are generated from a `{ ssh = 22, http = 80, https = 443 }` map, so opening another port is a one-line change to that map rather than a new hand-written block. If you add rules by hand in the console instead, `plan` will keep proposing to remove them - see section 12.
 
 ## 8. `compute.tf`
 
-This creates the A1 instance and, optionally, reserved public IPs (IPv4 and IPv6 use entirely different OCI resources for this - see the note after the code).
+Creates the A1 instance and, optionally, its reserved public IPs. IPv4 and IPv6 reservation use entirely different OCI resources - see the note at the end of this section.
 
-```hcl
-data "oci_core_images" "ubuntu_aarch64" {
-  compartment_id           = var.compartment_id
-  operating_system         = "Canonical Ubuntu"
-  operating_system_version = "24.04"
-  shape                    = "VM.Standard.A1.Flex"
-  sort_by                  = "TIMECREATED"
-  sort_order               = "DESC"
-}
+- **`data.oci_core_images.ubuntu_aarch64`** - looks up the newest Canonical Ubuntu 24.04 image built for `VM.Standard.A1.Flex` (aarch64), sorted by creation time descending, and takes `images[0]`.
+- **`oci_core_instance.this`** - the VM itself: shape `VM.Standard.A1.Flex` sized by `ocpus`/`memory_in_gbs`, booting the image above at `boot_volume_size_gb`. Its VNIC gets a public IPv4 and a `hostname_label`; your SSH public key is injected through `metadata.ssh_authorized_keys`.
+- **`data.oci_core_private_ips.instance_private_ip`** - resolves the instance's private IP to the private-IP OCID that a reserved public IPv4 has to attach to.
+- **`oci_core_public_ip.reserved_ipv4`** - created only when `reserve_public_ip` is true; a `RESERVED` public IPv4 that survives stop/start.
+- **`data.oci_core_vnic_attachments.instance_vnics`** - finds the instance's VNIC, needed by the IPv6 resource below.
+- **`oci_core_ipv6.reserved_ipv6`** - created only when `enable_ipv6` *and* `reserve_public_ip` are both true; a `RESERVED` IPv6 address on that VNIC.
 
-resource "oci_core_instance" "this" {
-  compartment_id      = var.compartment_id
-  availability_domain = var.availability_domain
-  display_name         = var.instance_display_name
-  shape                 = "VM.Standard.A1.Flex"
+Two details in this file are easy to break:
 
-  shape_config {
-    ocpus         = var.ocpus
-    memory_in_gbs = var.memory_in_gbs
-  }
+**`assign_ipv6ip` is deliberately `var.enable_ipv6 && !var.reserve_public_ip`.** The instance auto-assigns an ephemeral IPv6 only when you are *not* reserving one; the reserved path creates the address through `oci_core_ipv6` instead. The two are mutually exclusive, not additive.
 
-  source_details {
-    source_type             = "image"
-    source_id               = data.oci_core_images.ubuntu_aarch64.images[0].id
-    boot_volume_size_in_gbs = var.boot_volume_size_gb
-  }
+**The `lifecycle.ignore_changes` block is load-bearing.** It ignores:
 
-  create_vnic_details {
-    subnet_id        = oci_core_subnet.this.id
-    assign_public_ip = true
-    hostname_label   = var.instance_display_name
-    # Only auto-assign an ephemeral IPv6 here if we're NOT going to reserve one
-    # below - reserving uses a separate oci_core_ipv6 resource instead.
-    assign_ipv6ip    = var.enable_ipv6 && !var.reserve_public_ip
-  }
+- `metadata` - the exact bytes `file()` reads (a trailing newline, for instance) rarely match byte-for-byte what OCI stored on an already-running or imported instance
+- `source_details[0].source_id` - the image data source always resolves to the *newest* matching image, which won't match whatever image the instance actually booted from
 
-  metadata = {
-    ssh_authorized_keys = file(local.ssh_public_key_path)
-  }
+Without it, Terraform proposes destroying and recreating a live instance every time Canonical publishes a new 24.04 image.
 
-  # Prevents Terraform from destroying/recreating an already-running instance
-  # over two things that commonly drift without meaning anything changed:
-  # - metadata: file()'s exact bytes (e.g. trailing newline) rarely match
-  #   what's actually stored, byte-for-byte, on an imported instance
-  # - source_details[0].source_id: the image data source always resolves to
-  #   the newest matching image, which won't match whatever image OCID the
-  #   instance originally booted from
-  lifecycle {
-    ignore_changes = [
-      metadata,
-      source_details[0].source_id,
-    ]
-  }
-}
-
-# --- Reserved public IPv4 (stays fixed across stop/start) ---
-resource "oci_core_public_ip" "reserved_ipv4" {
-  count          = var.reserve_public_ip ? 1 : 0
-  compartment_id = var.compartment_id
-  lifetime       = "RESERVED"
-  display_name   = "${var.instance_display_name}-reserved-ip"
-  private_ip_id  = data.oci_core_private_ips.instance_private_ip.private_ips[0].id
-}
-
-data "oci_core_private_ips" "instance_private_ip" {
-  ip_address = oci_core_instance.this.private_ip
-  subnet_id  = oci_core_subnet.this.id
-}
-
-# --- Reserved IPv6 (separate resource type - IPv4/IPv6 reservation work differently in OCI) ---
-data "oci_core_vnic_attachments" "instance_vnics" {
-  compartment_id = var.compartment_id
-  instance_id    = oci_core_instance.this.id
-}
-
-resource "oci_core_ipv6" "reserved_ipv6" {
-  count           = (var.enable_ipv6 && var.reserve_public_ip) ? 1 : 0
-  vnic_id         = data.oci_core_vnic_attachments.instance_vnics.vnic_attachments[0].vnic_id
-  subnet_id       = oci_core_subnet.this.id
-  display_name    = "${var.instance_display_name}-reserved-ipv6"
-  lifetime        = "RESERVED"
-}
-```
-
-**Why IPv6 needs its own block:** OCI's IPv4 and IPv6 reservation are unrelated mechanisms. `oci_core_public_ip` (IPv4) creates a separate public IP *object* that attaches to an existing private IP - the private IP itself never changes. `oci_core_ipv6`, by contrast, *is* the address itself, directly on the VNIC - there's no separate "public IPv6 object" layered on top. That's why the instance's `assign_ipv6ip` is turned off when reserving: creating `oci_core_ipv6` with `lifetime = "RESERVED"` is what actually gets your instance its IPv6 address in that case, rather than layering a reservation on top of an auto-assigned ephemeral one.
+**Why IPv6 needs its own resource:** OCI's IPv4 and IPv6 reservation are unrelated mechanisms. `oci_core_public_ip` (IPv4) creates a separate public IP *object* that attaches to an existing private IP - the private IP itself never changes. `oci_core_ipv6`, by contrast, *is* the address itself, directly on the VNIC - there's no separate "public IPv6 object" layered on top. That's why the instance's `assign_ipv6ip` is turned off when reserving: creating `oci_core_ipv6` with `lifetime = "RESERVED"` is what actually gets your instance its IPv6 address in that case, rather than layering a reservation on top of an auto-assigned ephemeral one.
 
 ## 9. `outputs.tf`
 
-```hcl
-output "instance_public_ip" {
-  value = var.reserve_public_ip ? oci_core_public_ip.reserved_ipv4[0].ip_address : oci_core_instance.this.public_ip
-}
+What `terraform apply` prints when it finishes (and what `terraform output` replays later).
 
-output "instance_private_ip" {
-  value = oci_core_instance.this.private_ip
-}
+| Output | Value |
+| --- | --- |
+| `instance_public_ip` | The reserved IPv4 when `reserve_public_ip` is true, otherwise the instance's ephemeral public IP |
+| `instance_private_ip` | The instance's private IP inside the subnet |
+| `instance_public_ipv6` | The reserved IPv6 address; or `"IPv6 not enabled"`; or a reminder to check the VNIC in the console when the address is ephemeral |
+| `fqdn` | `<instance>.<subnet_dns_label>.<vcn_dns_label>.oraclevcn.com`, or `"DNS labels not set"` if either label is blank |
 
-output "instance_public_ipv6" {
-  value = (
-    !var.enable_ipv6 ? "IPv6 not enabled" :
-    var.reserve_public_ip ? oci_core_ipv6.reserved_ipv6[0].ip_address :
-    "assigned (ephemeral) - check the instance's VNIC in the console for the address"
-  )
-}
-
-output "fqdn" {
-  value = (var.vcn_dns_label != "" && var.subnet_dns_label != "") ? "${var.instance_display_name}.${var.subnet_dns_label}.${var.vcn_dns_label}.oraclevcn.com" : "DNS labels not set"
-}
-```
+The IPv6 and FQDN outputs are conditional expressions rather than plain references, because the resources behind them may not exist at all depending on `enable_ipv6` and the DNS labels.
 
 ## 10. `terraform.tfvars`
 
@@ -459,11 +199,10 @@ output "fqdn" {
 tenancy_ocid         = "ocid1.tenancy.oc1..your-tenancy-ocid"
 user_ocid            = "ocid1.user.oc1..your-user-ocid"
 fingerprint          = "xx:xx:xx:xx:...your-key-fingerprint"
-private_key_path     = "~/.oci-terraform/oci_api_key.pem"   # same on Linux and Windows - see local.private_key_path in providers.tf
-
+private_key_path     = "~/.oci-terraform/oci_api_key.pem"
 compartment_id       = "ocid1.tenancy.oc1..your-real-ocid"
 availability_domain  = "tWkk:SA-SAOPAULO-1-AD-1"
-enable_ipv6          = false
+region               = "sa-saopaulo-1"
 ```
 
 Add `terraform.tfvars` to `.gitignore` - it now holds your private key path and account identifiers alongside everything else.
