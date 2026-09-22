@@ -87,13 +87,14 @@ Keep these somewhere safe (a password manager, not committed to git) - they go i
 ## 4. Project structure
 
 ```text
-oci-infrastructure/
+/
 ├── providers.tf           # provider pin, credentials, path handling
 ├── variables.tf           # every input and its default
 ├── network.tf             # VCN, IGW, route table, security list, subnet
 ├── compute.tf             # image lookup, A1 instance, reserved IPs
 ├── outputs.tf             # what apply prints when it finishes
 ├── .gitattributes         # normalizes line endings to LF
+├── terraform.tfstate      # know current state - keep this out of git
 └── terraform.tfvars       # your actual values - keep this out of git
 ```
 
