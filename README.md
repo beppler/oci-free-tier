@@ -22,6 +22,15 @@ echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://
 sudo apt update && sudo apt install terraform
 ```
 
+**macOS (Homebrew):**
+
+```bash
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform
+```
+
+Use HashiCorp's own tap rather than plain `brew install terraform`. Since the license change, Homebrew's core `terraform` formula is frozen at 1.5.7 and gets no new releases. Upgrade later with `brew upgrade hashicorp/tap/terraform`.
+
 **Windows (winget):**
 
 ```powershell
@@ -30,7 +39,7 @@ winget install HashiCorp.Terraform
 
 Verify it installed correctly in a new terminal window (winget updates `PATH`, but existing terminal sessions won't see it until reopened):
 
-```powershell
+```bash
 terraform -version
 ```
 
@@ -46,7 +55,7 @@ Terraform's OCI provider authenticates with an **API signing key** - a public/pr
 
 **1. Generate the key pair**
 
-**Linux (Ubuntu/Debian):**
+**Linux / macOS:**
 
 ```bash
 mkdir -p ~/.oci
@@ -224,7 +233,7 @@ Newly created dynamic groups and policies can take a few minutes to take effect,
 
 Generate the key pair **before** running `plan`, because `plan` fails if the public key file doesn't exist.
 
-**Linux (Ubuntu/Debian):**
+**Linux / macOS:**
 
 ```bash
 mkdir -p ~/.oci
@@ -254,7 +263,7 @@ region      = <region>
 key_file    = ~/.oci/bucket_client_api_key.pem
 ```
 
-The profile goes in the OCI CLI's config file: `~/.oci/config` on Linux, `%USERPROFILE%\.oci\config` on Windows. Put it next to any profile you already have there. With that profile, the OCI CLI and SDKs work with `--profile bucket-client`:
+The profile goes in the OCI CLI's config file: `~/.oci/config` on Linux and macOS, `%USERPROFILE%\.oci\config` on Windows. Put it next to any profile you already have there. With that profile, the OCI CLI and SDKs work with `--profile bucket-client`:
 
 ```bash
 # Upload, list, download, delete single objects
