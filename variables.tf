@@ -12,6 +12,7 @@ variable "fingerprint" {
 
 variable "private_key_path" {
   type = string
+  default = "~/.oci/api_key.pem"
 }
 
 variable "compartment_id" {
@@ -84,4 +85,44 @@ variable "ssh_public_key_path" {
 variable "reserve_public_ip" {
   type    = bool
   default = true
+}
+
+variable "bucket_name" {
+  type    = string
+  default = "bucket-free"
+}
+
+variable "object_storage_quota_gb" {
+  type    = number
+  default = 20
+}
+
+variable "enforce_object_storage_quota" {
+  type    = bool
+  default = true
+}
+
+variable "bucket_vm_access" {
+  type    = bool
+  default = true
+}
+
+variable "bucket_client_access" {
+  type    = bool
+  default = true
+}
+
+variable "bucket_client_user_name" {
+  type    = string
+  default = "bucket-free-client"
+}
+
+variable "bucket_client_email" {
+  type    = string
+  default = null
+}
+
+variable "bucket_client_public_key_path" {
+  type    = string
+  default = "~/.oci/bucket_client_api_key_public.pem"
 }
