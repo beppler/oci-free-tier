@@ -1,4 +1,4 @@
-# OCI Ampere A1 Free Tier VM
+# OCI Free Tier Configuration
 
 A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with Terraform - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, and optionally DNS labels, IPv6, and a reserved public IP.
 
