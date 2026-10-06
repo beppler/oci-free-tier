@@ -92,6 +92,11 @@ variable "bucket_name" {
   default = "bucket-free"
 }
 
+variable "state_bucket_name" {
+  type    = string
+  default = "bucket-free-state"
+}
+
 variable "object_storage_quota_gb" {
   type    = number
   default = 20

@@ -22,6 +22,10 @@ output "bucket_name" {
   value = oci_objectstorage_bucket.this.name
 }
 
+output "state_bucket_name" {
+  value = oci_objectstorage_bucket.state.name
+}
+
 output "bucket_s3_endpoint" {
   value = "https://${data.oci_objectstorage_namespace.this.namespace}.compat.objectstorage.${var.region}.oraclecloud.com"
 }

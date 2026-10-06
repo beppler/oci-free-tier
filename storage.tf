@@ -16,6 +16,18 @@ resource "oci_objectstorage_bucket" "this" {
   versioning     = "Disabled"
 }
 
+# --- Remote Terraform state (see README section 15). Versioning is on here
+# because state files are a few KB each, and old versions are what you roll
+# back to if a state write goes wrong. ---
+resource "oci_objectstorage_bucket" "state" {
+  compartment_id = var.compartment_id
+  namespace      = data.oci_objectstorage_namespace.this.namespace
+  name           = var.state_bucket_name
+  access_type    = "NoPublicAccess"
+  storage_tier   = "Standard"
+  versioning     = "Enabled"
+}
+
 # --- Hard cap: the 20 GB is a usage limit, not an allocation — anything
 # stored past it is billed. This quota makes writes fail at the limit instead.
 # Quota policies must live in the root compartment and need tenancy admin. ---

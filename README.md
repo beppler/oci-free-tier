@@ -1,6 +1,6 @@
 # OCI Free Tier Configuration
 
-A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with Terraform - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, and optionally DNS labels, IPv6, and a reserved public IP.
+A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with Terraform - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, a second bucket for remote Terraform state, and optionally DNS labels, IPv6, and a reserved public IP.
 
 ---
 
@@ -53,7 +53,7 @@ Terraform needs its own OCI API credentials, independent of anything the OCI CLI
 
 Terraform's OCI provider authenticates with an **API signing key** - a public/private RSA key pair, where the public key is uploaded to your OCI user account and the private key stays on your machine. This is the same underlying mechanism the OCI CLI uses, but here we generate and wire it up directly for Terraform rather than relying on `oci setup config`. The key files go in `~/.oci/`, the conventional location, but Terraform reads the key file directly and never reads `~/.oci/config`.
 
-**1. Generate the key pair**
+### 3.1. Generate the key pair
 
 **Linux / macOS:**
 
@@ -80,16 +80,16 @@ Check `$PSVersionTable.PSVersion` first — this needs PowerShell 7.1+ (`pwsh.ex
 
 Both versions append an `OCI_API_KEY` line after the end of the private key. This is the label OCI puts on keys downloaded from the console, so secret scanners can recognize the file as an OCI API key. OCI tools ignore the extra line when reading the key; without it, the OCI CLI prints a warning suggesting you add it.
 
-**2. Upload the public key to your OCI user account**
+### 3.2. Upload the public key to your OCI user account
 
 1. Console → click your **profile icon** (top right) → **My profile**
 2. Under **Resources**, click **API keys** → **Add API Key**
 3. Choose **Paste public key**, paste the contents of `api_key_public.pem`
 4. Click **Add** - OCI shows a **configuration file preview** with your `user`, `tenancy`, `region`, and **fingerprint** values. Copy the **fingerprint** shown here; you'll need it below.
 
-**3. Collect the four values Terraform needs**
+### 3.3. Collect the four values Terraform needs
 
-- **Tenancy OCID** - profile icon → **Tenancy: <name>**, copy the OCID shown there
+- **Tenancy OCID** - profile icon → **Tenancy: [name]**, copy the OCID shown there
 - **User OCID** - profile icon → **My profile**, copy the OCID shown there
 - **Fingerprint** - from step 2 above
 - **Private key path** - `~/.oci/api_key.pem` is the default, so you only need to set `private_key_path` if you saved the key somewhere else
@@ -104,10 +104,12 @@ Keep these somewhere safe (a password manager, not committed to git) - they go i
 ├── variables.tf           # every input and its default
 ├── network.tf             # VCN, IGW, route table, security list, subnet
 ├── compute.tf             # image lookup, A1 instance, reserved IPs
-├── storage.tf             # Object Storage bucket, 20 GB quota, VM + client access
+├── storage.tf             # Object Storage buckets (data + state), 20 GB quota, VM + client access
 ├── outputs.tf             # what apply prints when it finishes
 ├── .gitattributes         # normalizes line endings to LF
-├── terraform.tfstate      # know current state - keep this out of git
+├── terraform.tfstate      # know current state - keep this out of git (until moved to the state bucket, section 15)
+├── backend.tf             # optional, you create it in section 15 - remote state in the state bucket
+├── backend.hcl            # optional, section 15 - backend credentials, keep this out of git
 └── terraform.tfvars       # your actual values - keep this out of git
 ```
 
@@ -136,7 +138,7 @@ Every input the configuration takes. Six have no default and must be supplied in
 | `fingerprint` | string | API key fingerprint (section 3) |
 | `compartment_id` | string | Compartment the resources are created in |
 | `availability_domain` | string | Target AD, e.g. `tWkk:SA-SAOPAULO-1-AD-1` |
-| `region` | string | `sa-saopaulo-1` | OCI region |
+| `region` | string | OCI region, e.g. `sa-saopaulo-1` |
 
 **Optional - with defaults:**
 
@@ -156,6 +158,7 @@ Every input the configuration takes. Six have no default and must be supplied in
 | `ssh_public_key_path` | string | `~/.ssh/id_rsa.pub` | SSH public key injected into the instance; `~` is expanded |
 | `reserve_public_ip` | bool | `true` | Reserve the public IPv4 (and IPv6) instead of letting OCI assign ephemeral ones |
 | `bucket_name` | string | `bucket-free` | Object Storage bucket name |
+| `state_bucket_name` | string | `bucket-free-state` | Bucket that holds the remote Terraform state (section 15) |
 | `object_storage_quota_gb` | number | `20` | Object Storage quota in GB - the Always Free ceiling |
 | `enforce_object_storage_quota` | bool | `true` | Create the tenancy quota policy that enforces `object_storage_quota_gb` (needs tenancy admin) |
 | `bucket_vm_access` | bool | `true` | Let the VM use the bucket through instance principal (dynamic group + policy) |
@@ -204,12 +207,13 @@ Without it, Terraform proposes destroying and recreating a live instance every t
 
 ## 9. `storage.tf`
 
-Creates a private Object Storage bucket, caps usage at the Always Free allowance, lets the VM use the bucket without API keys stored on it, and creates a dedicated bucket-only user for other clients.
+Creates a private Object Storage bucket for your data and a second one for Terraform state, caps usage at the Always Free allowance, lets the VM use the bucket without API keys stored on it, and creates a dedicated bucket-only user for other clients.
 
-The key thing to understand is that **the 20 GB is not allocated to anything.** A bucket has no size; it grows with whatever you put in it. Always Free covers the first 20 GB stored in the tenancy (Standard, Infrequent Access, and Archive combined), and anything beyond that is billed. So "all 20 GB" means one bucket, plus a quota that stops you from going over.
+The key thing to understand is that **the 20 GB is not allocated to anything.** A bucket has no size; it grows with whatever you put in it. Always Free covers the first 20 GB stored in the tenancy (Standard, Infrequent Access, and Archive combined), and anything beyond that is billed. So the data bucket can use practically all 20 GB, the state bucket takes a few KB of it, and the quota stops you from going over.
 
 - **`data.oci_objectstorage_namespace.this`** - looks up the tenancy's Object Storage namespace. Every bucket name and URL is scoped by this namespace.
 - **`oci_objectstorage_bucket.this`** - the bucket. It has `NoPublicAccess` (nothing is reachable without authentication) and the `Standard` tier. `versioning` is `Disabled` on purpose, because old object versions would silently count toward the 20 GB.
+- **`oci_objectstorage_bucket.state`** - holds `terraform.tfstate` once you switch to the remote backend (section 15). It's private and `Standard` like the data bucket, but `versioning` is `Enabled`: every state write keeps the previous version, so a bad apply can be rolled back. State files are a few KB, so the extra versions barely touch the 20 GB. Neither the VM nor the bucket client user gets access to it.
 - **`oci_limits_quota.object_storage`** - a quota policy, `set object-storage quota storage-bytes to <bytes> in tenancy`, with the byte count computed from `object_storage_quota_gb`. Once the limit is reached, uploads fail instead of being billed. The quota is regional, so it covers this `region`. Quota policies must be created in the **root compartment**, and creating one needs tenancy-admin rights. If your API user doesn't have those rights, set `enforce_object_storage_quota = false` and keep an eye on usage in the console.
 - **`oci_identity_dynamic_group.vm`** - a dynamic group whose matching rule is exactly this instance's OCID. It lives in the root compartment, like all dynamic groups.
 - **`oci_identity_policy.vm_bucket`** - allows that dynamic group to `read buckets` and `manage objects`, restricted by `target.bucket.name` to this one bucket.
@@ -312,6 +316,7 @@ What `terraform apply` prints when it finishes (and what `terraform output` repl
 | `instance_public_ipv6` | The reserved IPv6 address; or `"IPv6 not enabled"`; or a reminder to check the VNIC in the console when the address is ephemeral |
 | `object_storage_namespace` | The tenancy's Object Storage namespace |
 | `bucket_name` | The bucket's name |
+| `state_bucket_name` | The state bucket's name, for `backend.tf` |
 | `bucket_s3_endpoint` | `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, for S3-compatible tools |
 | `bucket_client_user_ocid` | The bucket client user's OCID, or `"bucket client access not enabled"` |
 | `bucket_client_key_fingerprint` | Fingerprint of that user's API key, for the client's OCI config profile |
@@ -363,6 +368,7 @@ terraform import oci_core_subnet.this [existing-subnet-ocid]
 terraform import oci_core_instance.this [existing-instance-ocid]
 terraform import oci_core_public_ip.reserved_ipv4[0] [existing-reserved-ip-ocid]   # only if you already have a reserved IP
 terraform import oci_objectstorage_bucket.this n/[namespace]/b/[bucket-name]       # only if the bucket already exists
+terraform import oci_objectstorage_bucket.state n/[namespace]/b/[state-bucket-name] # only if the state bucket already exists
 ```
 
 Find each OCID either in the console (each resource's details page) or via the CLI, e.g.:
@@ -440,4 +446,50 @@ terraform apply -auto-approve   # picks up the rest (reserved IP, etc.)
 
 ## 15. State file - a word of caution
 
-`terraform.tfstate` will contain sensitive details about your infrastructure (OCIDs, IPs, etc.) in plain text. Keep it out of git (`echo "*.tfstate*" >> .gitignore`), and if you ever want to collaborate or run Terraform from multiple machines, look into OCI Object Storage as a remote backend rather than passing the local state file around.
+`terraform.tfstate` will contain sensitive details about your infrastructure (OCIDs, IPs, etc.) in plain text. Keep it out of git (`echo "*.tfstate*" >> .gitignore`). To run Terraform from more than one machine, or simply not lose the state with your laptop, move it into the `bucket-free-state` bucket that `storage.tf` creates.
+
+The bucket has to exist before Terraform can store state in it, so this is a two-step process: run `terraform apply` once with local state as usual (sections 12-13), then switch backends. This uses Terraform's native `oci` backend, which needs **Terraform 1.12 or newer** (`terraform -version`) and also handles state locking.
+
+Create `backend.tf` next to the other `.tf` files:
+
+```hcl
+terraform {
+  backend "oci" {
+    bucket = "bucket-free-state"
+    key    = "terraform.tfstate"
+  }
+}
+```
+
+Backend blocks can't read variables, so the remaining settings go in `backend.hcl`, which is in `.gitignore`. Use the same values as `terraform.tfvars`, plus the `object_storage_namespace` output:
+
+```hcl
+namespace        = "<object_storage_namespace>"
+region           = "sa-saopaulo-1"
+tenancy_ocid     = "ocid1.tenancy.oc1..your-tenancy-ocid"
+user_ocid        = "ocid1.user.oc1..your-user-ocid"
+fingerprint      = "xx:xx:xx:xx:...your-key-fingerprint"
+private_key_path = "/home/you/.oci/api_key.pem"
+```
+
+Write `private_key_path` as a full path, since `pathexpand()` (section 5) isn't available in backend settings. On Windows, use forward slashes, for example `C:/Users/you/.oci/api_key.pem`.
+
+Then migrate the existing state into the bucket:
+
+```bash
+terraform init -backend-config=backend.hcl -migrate-state
+```
+
+Answer `yes` when Terraform asks to copy the state. Run `terraform plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `backend.hcl` and run `terraform init -backend-config=backend.hcl`.
+
+To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get --version-id <id>`.
+
+**Before `terraform destroy`**, move the state back to local first. Otherwise destroy removes everything else and then fails on the state bucket, which still holds the state:
+
+```bash
+# delete or rename backend.tf, then:
+terraform init -migrate-state
+terraform destroy
+```
+
+Even with local state, destroy can only delete `bucket-free-state` once it's empty, including old object versions. Empty it in the console first (Buckets → `bucket-free-state` → Objects, with **Show deleted objects** on).
