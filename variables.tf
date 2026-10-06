@@ -128,8 +128,3 @@ variable "bucket_client_email" {
   type    = string
   default = null
 }
-
-variable "bucket_client_public_key_path" {
-  type    = string
-  default = "~/.oci/bucket_client_api_key_public.pem"
-}

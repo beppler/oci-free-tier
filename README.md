@@ -162,10 +162,9 @@ Every input the configuration takes. Six have no default and must be supplied in
 | `object_storage_quota_gb` | number | `20` | Object Storage quota in GB - the Always Free ceiling |
 | `enforce_object_storage_quota` | bool | `true` | Create the tenancy quota policy that enforces `object_storage_quota_gb` (needs tenancy admin) |
 | `bucket_vm_access` | bool | `true` | Let the VM use the bucket through instance principal (dynamic group + policy) |
-| `bucket_client_access` | bool | `true` | Create the dedicated bucket-only user, group, policy, and API key for other clients |
+| `bucket_client_access` | bool | `true` | Create the dedicated bucket-only user, group, and policy for other clients |
 | `bucket_client_user_name` | string | `bucket-free-client` | That user's name; also prefixes its group and policy names |
 | `bucket_client_email` | string | `null` | Email for that user; needed only in tenancies whose identity domain requires one |
-| `bucket_client_public_key_path` | string | `~/.oci/bucket_client_api_key_public.pem` | Public key uploaded as the user's API key; `~` is expanded |
 
 `ocpus` and `memory_in_gbs` sit exactly on the Always Free cap of 2 OCPU / 12 GB **per tenancy**. Raising either one, or running a second A1 instance alongside this one, takes you off the free tier.
 
@@ -233,9 +232,8 @@ Newly created dynamic groups and policies can take a few minutes to take effect,
 - **`oci_identity_user_capabilities_management.bucket_client`** - limits the user to API keys and Customer Secret Keys, with no console password, auth tokens, or SMTP credentials.
 - **`oci_identity_group.bucket_client`** and **`oci_identity_user_group_membership.bucket_client`** - a group containing the user, which is what the policy grants access to.
 - **`oci_identity_policy.bucket_client`** - the same two bucket-only statements the VM gets.
-- **`oci_identity_api_key.bucket_client`** - uploads the public key found at `bucket_client_public_key_path`. Only the public key goes to OCI, so nothing secret ends up in `terraform.tfstate`.
 
-Generate the key pair **before** running `plan`, because `plan` fails if the public key file doesn't exist.
+Terraform doesn't create the user's API key. You add it by hand after `apply`, the same way you did for your own user in section 3, so no key material ends up in `terraform.tfstate` and `plan` doesn't depend on a key file being present. First generate the key pair:
 
 **Linux / macOS:**
 
@@ -256,12 +254,20 @@ Set-Content -Path "$env:USERPROFILE\.oci\bucket_client_api_key.pem" -Value ($rsa
 Set-Content -Path "$env:USERPROFILE\.oci\bucket_client_api_key_public.pem" -Value $rsa.ExportSubjectPublicKeyInfoPem() -NoNewline
 ```
 
-Then copy the private key to each client and point an OCI config profile at it, using the `bucket_client_user_ocid` and `bucket_client_key_fingerprint` outputs:
+Then upload the public key to the user, either in the console - Identity → Users → `bucket-free-client` → **API keys** → **Add API key** → **Paste public key**, as in section 3.2 - or with the OCI CLI, using the `bucket_client_user_ocid` output:
+
+```bash
+oci iam user api-key upload --user-id [bucket_client_user_ocid] --key-file ~/.oci/bucket_client_api_key_public.pem
+```
+
+Both show the key's **fingerprint**; copy it. A user can have at most three API keys, so you can give separate clients separate keys and revoke one without touching the others.
+
+Copy the private key to each client and point an OCI config profile at it, using the `bucket_client_user_ocid` output and that fingerprint:
 
 ```ini
 [bucket-client]
 user        = <bucket_client_user_ocid>
-fingerprint = <bucket_client_key_fingerprint>
+fingerprint = <api_key_fingerprint>
 tenancy     = <tenancy_ocid>
 region      = <region>
 key_file    = ~/.oci/bucket_client_api_key.pem
@@ -319,7 +325,6 @@ What `terraform apply` prints when it finishes (and what `terraform output` repl
 | `state_bucket_name` | The state bucket's name, for `backend.tf` |
 | `bucket_s3_endpoint` | `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, for S3-compatible tools |
 | `bucket_client_user_ocid` | The bucket client user's OCID, or `"bucket client access not enabled"` |
-| `bucket_client_key_fingerprint` | Fingerprint of that user's API key, for the client's OCI config profile |
 | `fqdn` | `<instance>.<subnet_dns_label>.<vcn_dns_label>.oraclevcn.com`, or `"DNS labels not set"` if either label is blank |
 
 The IPv6 and FQDN outputs are conditional expressions rather than plain references, because the resources behind them may not exist at all depending on `enable_ipv6` and the DNS labels.

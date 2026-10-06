@@ -34,10 +34,6 @@ output "bucket_client_user_ocid" {
   value = var.bucket_client_access ? oci_identity_user.bucket_client[0].id : "bucket client access not enabled"
 }
 
-output "bucket_client_key_fingerprint" {
-  value = var.bucket_client_access ? oci_identity_api_key.bucket_client[0].fingerprint : "bucket client access not enabled"
-}
-
 output "fqdn" {
   value = (var.vcn_dns_label != "" && var.subnet_dns_label != "") ? "${var.instance_display_name}.${var.subnet_dns_label}.${var.vcn_dns_label}.oraclevcn.com" : "DNS labels not set"
 }

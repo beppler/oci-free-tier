@@ -62,9 +62,8 @@ resource "oci_identity_policy" "vm_bucket" {
 }
 
 # --- Dedicated user for other clients (CLI/SDK/rclone on other machines) ---
-# Terraform only uploads the public key; the private key stays on the client, so
-# no secret lands in state. S3-only tools get a Customer Secret Key created by
-# hand in the console for this same user — the policy below already covers it.
+# Its API key and any S3 Customer Secret Key are added by hand after apply, so
+# no key material lands in state — the policy below already covers both.
 resource "oci_identity_user" "bucket_client" {
   count          = var.bucket_client_access ? 1 : 0
   compartment_id = var.tenancy_ocid
@@ -95,12 +94,6 @@ resource "oci_identity_user_group_membership" "bucket_client" {
   count    = var.bucket_client_access ? 1 : 0
   group_id = oci_identity_group.bucket_client[0].id
   user_id  = oci_identity_user.bucket_client[0].id
-}
-
-resource "oci_identity_api_key" "bucket_client" {
-  count     = var.bucket_client_access ? 1 : 0
-  user_id   = oci_identity_user.bucket_client[0].id
-  key_value = file(local.bucket_client_public_key_path)
 }
 
 resource "oci_identity_policy" "bucket_client" {

@@ -11,7 +11,6 @@ locals {
   # pathexpand() resolves ~ to the actual home directory at apply time both on Linux and Windows
   private_key_path = pathexpand(var.private_key_path)
   ssh_public_key_path = pathexpand(var.ssh_public_key_path)
-  bucket_client_public_key_path = pathexpand(var.bucket_client_public_key_path)
 }
 
 provider "oci" {
