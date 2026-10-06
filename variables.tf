@@ -19,12 +19,14 @@ variable "compartment_id" {
   type = string
 }
 
-variable "region" {
-  type    = string
-}
-
 variable "availability_domain" {
   type = string
+  default = "tWkk:SA-SAOPAULO-1-AD-1"
+}
+
+variable "region" {
+  type    = string
+  default = "sa-saopaulo-1"
 }
 
 variable "vcn_cidr" {

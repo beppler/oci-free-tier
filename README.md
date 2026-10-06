@@ -137,13 +137,13 @@ Every input the configuration takes. Six have no default and must be supplied in
 | `user_ocid` | string | User OCID (section 3) |
 | `fingerprint` | string | API key fingerprint (section 3) |
 | `compartment_id` | string | Compartment the resources are created in |
-| `availability_domain` | string | Target AD, e.g. `tWkk:SA-SAOPAULO-1-AD-1` |
-| `region` | string | OCI region, e.g. `sa-saopaulo-1` |
 
 **Optional - with defaults:**
 
 | Variable | Type | Default | Purpose |
 | --- | --- | --- | --- |
+| `availability_domain` | string | `tWkk:SA-SAOPAULO-1-AD-1` | Target Availability Domain |
+| `region` | string | `sa-saopaulo-1` | Target Region |
 | `private_key_path` | string | `~/.oci/api_key.pem` | Path to the API signing private key; `~` is expanded |
 | `vcn_cidr` | string | `10.0.0.0/24` | VCN CIDR; the subnet reuses it verbatim |
 | `vcn_name` | string | `vcn-free-public` | VCN display name; also prefixes the IGW/route table/security list names |
