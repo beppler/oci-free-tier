@@ -37,4 +37,4 @@ terraform.rc
 *.backup
 
 # Remote state backend settings (OCIDs, key path)
-backend.hcl
+*.tfbackend

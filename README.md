@@ -109,7 +109,7 @@ Keep these somewhere safe (a password manager, not committed to git) - they go i
 ├── .gitattributes         # normalizes line endings to LF
 ├── terraform.tfstate      # know current state - keep this out of git (until moved to the state bucket, section 15)
 ├── backend.tf             # optional, you create it in section 15 - remote state in the state bucket
-├── backend.hcl            # optional, section 15 - backend credentials, keep this out of git
+├── oci.tfbackend          # optional, section 15 - backend credentials, keep this out of git
 └── terraform.tfvars       # your actual values - keep this out of git
 ```
 
@@ -461,7 +461,7 @@ terraform {
 }
 ```
 
-Backend blocks can't read variables, so the remaining settings go in `backend.hcl`, which is in `.gitignore`. Use the same values as `terraform.tfvars`, plus the `object_storage_namespace` output:
+Backend blocks can't read variables, so the remaining settings go in `oci.tfbackend`, which is in `.gitignore`. Use the same values as `terraform.tfvars`, plus the `object_storage_namespace` output:
 
 ```hcl
 namespace        = "<object_storage_namespace>"
@@ -477,10 +477,10 @@ Write `private_key_path` as a full path, since `pathexpand()` (section 5) isn't 
 Then migrate the existing state into the bucket:
 
 ```bash
-terraform init -backend-config=backend.hcl -migrate-state
+terraform init -backend-config=oci.tfbackend -migrate-state
 ```
 
-Answer `yes` when Terraform asks to copy the state. Run `terraform plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `backend.hcl` and run `terraform init -backend-config=backend.hcl`.
+Answer `yes` when Terraform asks to copy the state. Run `terraform plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `oci.tfbackend` and run `terraform init -backend-config=oci.tfbackend`.
 
 To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get --version-id <id>`.
 
