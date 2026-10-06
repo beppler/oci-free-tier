@@ -142,9 +142,9 @@ Every input the configuration takes. Six have no default and must be supplied in
 
 | Variable | Type | Default | Purpose |
 | --- | --- | --- | --- |
+| `private_key_path` | string | `~/.oci/api_key.pem` | Path to the API signing private key; `~` is expanded |
 | `availability_domain` | string | `tWkk:SA-SAOPAULO-1-AD-1` | Target Availability Domain |
 | `region` | string | `sa-saopaulo-1` | Target Region |
-| `private_key_path` | string | `~/.oci/api_key.pem` | Path to the API signing private key; `~` is expanded |
 | `vcn_cidr` | string | `10.0.0.0/24` | VCN CIDR; the subnet reuses it verbatim |
 | `vcn_name` | string | `vcn-free-public` | VCN display name; also prefixes the IGW/route table/security list names |
 | `subnet_name` | string | `subnet-free-public` | Subnet display name |
