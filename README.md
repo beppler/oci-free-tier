@@ -485,9 +485,9 @@ Then migrate the existing state into the bucket:
 terraform init -backend-config=oci.tfbackend -migrate-state
 ```
 
-Answer `yes` when Terraform asks to copy the state. Run `terraform plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `oci.tfbackend` and run `terraform init -backend-config=oci.tfbackend`.
+`-migrate-state` copies the local state into the bucket automatically; only if it prompts about migrating workspace state (it doesn't for the single default workspace) answer `yes`, or add `-force-copy` to pre-answer it - that also keeps the command safe to run non-interactively. Run `terraform plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `oci.tfbackend` and run `terraform init -backend-config=oci.tfbackend` - no `-migrate-state` needed when there's no existing local state (passing it would be harmless).
 
-To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get --version-id <id>`.
+To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get -bn bucket-free-state --name terraform.tfstate --version-id [id] --file terraform.tfstate.restored`. Don't write it straight to `terraform.tfstate` - restore it through the backend (e.g. `terraform state push terraform.tfstate.restored`) rather than uploading it over the live state object, so the version history stays intact.
 
 **Before `terraform destroy`**, move the state back to local first. Otherwise destroy removes everything else and then fails on the state bucket, which still holds the state:
 
