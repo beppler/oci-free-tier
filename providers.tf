@@ -1,4 +1,6 @@
 terraform {
+  required_version = ">= 1.10" # S3 backend native locking (use_lockfile), README section 15
+
   required_providers {
     oci = {
       source  = "oracle/oci"

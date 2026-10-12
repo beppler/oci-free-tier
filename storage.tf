@@ -16,7 +16,7 @@ resource "oci_objectstorage_bucket" "this" {
   versioning     = "Disabled"
 }
 
-# --- Remote Terraform state (see README section 15). Versioning is on here
+# --- Remote OpenTofu state (see README section 15). Versioning is on here
 # because state files are a few KB each, and old versions are what you roll
 # back to if a state write goes wrong. ---
 resource "oci_objectstorage_bucket" "state" {

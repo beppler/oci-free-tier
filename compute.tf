@@ -37,7 +37,7 @@ resource "oci_core_instance" "this" {
     ssh_authorized_keys = file(local.ssh_public_key_path)
   }
 
-  # Prevents Terraform from destroying/recreating an already-running instance
+  # Prevents OpenTofu from destroying/recreating an already-running instance
   # over two things that commonly drift without meaning anything changed:
   # - metadata: file()'s exact bytes (e.g. trailing newline) rarely match
   #   what's actually stored, byte-for-byte, on an imported instance

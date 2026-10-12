@@ -1,57 +1,62 @@
 # OCI Free Tier Configuration
 
-A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with Terraform - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, a second bucket for remote Terraform state, and optionally DNS labels, IPv6, and a reserved public IP.
+A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with OpenTofu - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, a second bucket for remote OpenTofu state, and optionally DNS labels, IPv6, and a reserved public IP.
 
 ---
 
-## 1. Why Terraform for this
+## 1. Why OpenTofu for this
 
-- **State tracking**: Terraform remembers exactly what it created (`terraform.tfstate`) and can tell you what's changed or drifted, so you always know what's actually deployed.
-- **Idempotent by default**: `terraform apply` only changes what's different from the last run - safe to run repeatedly without worrying about duplicating resources.
+- **State tracking**: OpenTofu remembers exactly what it created (`terraform.tfstate`) and can tell you what's changed or drifted, so you always know what's actually deployed.
+- **Idempotent by default**: `tofu apply` only changes what's different from the last run - safe to run repeatedly without worrying about duplicating resources.
 - **One place to see everything**: a handful of `.tf` files describe the whole stack, with resources referencing each other directly instead of you tracking OCIDs by hand.
-- **Trade-off**: less control over retry behavior - Ampere A1 capacity errors ("Out of capacity") aren't retried automatically by Terraform (more on this in section 14).
+- **Trade-off**: less control over retry behavior - Ampere A1 capacity errors ("Out of capacity") aren't retried automatically by OpenTofu (more on this in section 14).
 
-## 2. Install Terraform and set up the OCI provider
+## 2. Install OpenTofu and set up the OCI provider
+
+[OpenTofu](https://opentofu.org) is the open-source, MPL-licensed fork of Terraform. It reads the same `.tf` files, `terraform.tfvars`, and `terraform.tfstate`, so those keep their usual names. The CLI command is `tofu`. This guide needs **OpenTofu 1.10 or newer**, which `providers.tf` enforces through `required_version`.
 
 **Linux (Ubuntu/Debian):**
 
 ```bash
-sudo apt update && sudo apt install -y gnupg software-properties-common
-wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-sudo apt update && sudo apt install terraform
+curl --proto '=https' --tlsv1.2 -fsSL https://get.opentofu.org/install-opentofu.sh -o install-opentofu.sh
+chmod +x install-opentofu.sh
+./install-opentofu.sh --install-method deb
+rm -f install-opentofu.sh
 ```
+
+The installer adds OpenTofu's signed apt repository, so `sudo apt update && sudo apt upgrade` keeps it current.
 
 **macOS (Homebrew):**
 
 ```bash
-brew tap hashicorp/tap
-brew install hashicorp/tap/terraform
+brew install opentofu
 ```
 
-Use HashiCorp's own tap rather than plain `brew install terraform`. Since the license change, Homebrew's core `terraform` formula is frozen at 1.5.7 and gets no new releases. Upgrade later with `brew upgrade hashicorp/tap/terraform`.
+OpenTofu is in Homebrew core, so no tap is needed. Upgrade later with `brew upgrade opentofu`.
 
 **Windows (winget):**
 
 ```powershell
-winget install HashiCorp.Terraform
+winget install --exact --id=OpenTofu.Tofu
 ```
 
 Verify it installed correctly in a new terminal window (winget updates `PATH`, but existing terminal sessions won't see it until reopened):
 
 ```bash
-terraform -version
+tofu -version
 ```
 
-Next, set up authentication - Terraform uses its own API key rather than reusing anything from the OCI CLI.
+If you already ran this configuration with Terraform, read section 12.1 before running any `tofu` command against your existing state.
 
-A Windows-specific note for later sections: both `private_key_path` and `ssh_public_key_path` are resolved through `pathexpand()` (section 5), so `~/...` works unchanged in `terraform.tfvars` on either OS - no backslash/forward-slash concerns to worry about for either value. Everything else in this guide - the `.tf` files themselves and the `terraform init/plan/apply/destroy` commands - works identically on Windows.
+Next, set up authentication - OpenTofu uses its own API key rather than reusing anything from the OCI CLI.
 
-Terraform needs its own OCI API credentials, independent of anything the OCI CLI has configured - set that up next.
+A Windows-specific note for later sections: both `private_key_path` and `ssh_public_key_path` are resolved through `pathexpand()` (section 5), so `~/...` works unchanged in `terraform.tfvars` on either OS - no backslash/forward-slash concerns to worry about for either value. Everything else in this guide - the `.tf` files themselves and the `tofu init/plan/apply/destroy` commands - works identically on Windows.
+
+OpenTofu needs its own OCI API credentials, independent of anything the OCI CLI has configured - set that up next.
 
 ## 3. Set up OCI API authentication (standalone, not via the OCI CLI)
 
-Terraform's OCI provider authenticates with an **API signing key** - a public/private RSA key pair, where the public key is uploaded to your OCI user account and the private key stays on your machine. This is the same underlying mechanism the OCI CLI uses, but here we generate and wire it up directly for Terraform rather than relying on `oci setup config`. The key files go in `~/.oci/`, the conventional location, but Terraform reads the key file directly and never reads `~/.oci/config`.
+OpenTofu's OCI provider authenticates with an **API signing key** - a public/private RSA key pair, where the public key is uploaded to your OCI user account and the private key stays on your machine. This is the same underlying mechanism the OCI CLI uses, but here we generate and wire it up directly for OpenTofu rather than relying on `oci setup config`. The key files go in `~/.oci/`, the conventional location, but OpenTofu reads the key file directly and never reads `~/.oci/config`.
 
 ### 3.1. Generate the key pair
 
@@ -87,7 +92,7 @@ Both versions append an `OCI_API_KEY` line after the end of the private key. Thi
 3. Choose **Paste public key**, paste the contents of `api_key_public.pem`
 4. Click **Add** - OCI shows a **configuration file preview** with your `user`, `tenancy`, `region`, and **fingerprint** values. Copy the **fingerprint** shown here; you'll need it below.
 
-### 3.3. Collect the four values Terraform needs
+### 3.3. Collect the four values OpenTofu needs
 
 - **Tenancy OCID** - profile icon → **Tenancy: [name]**, copy the OCID shown there
 - **User OCID** - profile icon → **My profile**, copy the OCID shown there
@@ -109,7 +114,8 @@ Keep these somewhere safe (a password manager, not committed to git) - they go i
 ├── .gitattributes         # normalizes line endings to LF
 ├── terraform.tfstate      # know current state - keep this out of git (until moved to the state bucket, section 15)
 ├── backend.tf             # optional, you create it in section 15 - remote state in the state bucket
-├── oci.tfbackend          # optional, section 15 - backend credentials, keep this out of git
+├── oci.tfbackend          # optional, section 15 - S3 endpoint and Customer Secret Key, keep this out of git
+├── encryption.tf          # optional, section 15 - client-side state encryption
 └── terraform.tfvars       # your actual values - keep this out of git
 ```
 
@@ -117,8 +123,9 @@ Sections 5-10 below describe what each file contains and why, rather than reprod
 
 ## 5. `providers.tf`
 
-Pins the provider and normalizes the two filesystem paths Terraform needs.
+Pins the provider and normalizes the two filesystem paths OpenTofu needs.
 
+- **`terraform.required_version`** - requires OpenTofu 1.10 or newer, the first release with lock files for the `s3` backend (section 15).
 - **`terraform.required_providers`** - pins `oracle/oci` to `~> 7.0`. The 5.x line predates the `lifetime` argument on `oci_core_ipv6`, so reserved IPv6 (section 8) won't work on it.
 - **`locals`** - runs both `var.private_key_path` and `var.ssh_public_key_path` through `pathexpand()`, which resolves a leading `~` to the real home directory at apply time on Linux *and* Windows. This is why `~/...` paths in `terraform.tfvars` need no OS-specific quoting.
 - **`provider "oci"`** - wires tenancy, user, fingerprint, private key, and region straight from variables.
@@ -158,7 +165,7 @@ Every input the configuration takes. Six have no default and must be supplied in
 | `ssh_public_key_path` | string | `~/.ssh/id_rsa.pub` | SSH public key injected into the instance; `~` is expanded |
 | `reserve_public_ip` | bool | `true` | Reserve the public IPv4 (and IPv6) instead of letting OCI assign ephemeral ones |
 | `bucket_name` | string | `bucket-free` | Object Storage bucket name |
-| `state_bucket_name` | string | `bucket-free-state` | Bucket that holds the remote Terraform state (section 15) |
+| `state_bucket_name` | string | `bucket-free-state` | Bucket that holds the remote OpenTofu state (section 15) |
 | `object_storage_quota_gb` | number | `20` | Object Storage quota in GB - the Always Free ceiling |
 | `enforce_object_storage_quota` | bool | `true` | Create the tenancy quota policy that enforces `object_storage_quota_gb` (needs tenancy admin) |
 | `bucket_vm_access` | bool | `true` | Let the VM use the bucket through instance principal (dynamic group + policy) |
@@ -200,13 +207,13 @@ Two details in this file are easy to break:
 - `metadata` - the exact bytes `file()` reads (a trailing newline, for instance) rarely match byte-for-byte what OCI stored on an already-running or imported instance
 - `source_details[0].source_id` - the image data source always resolves to the *newest* matching image, which won't match whatever image the instance actually booted from
 
-Without it, Terraform proposes destroying and recreating a live instance every time Canonical publishes a new 24.04 image.
+Without it, OpenTofu proposes destroying and recreating a live instance every time Canonical publishes a new 24.04 image.
 
 **Why IPv6 needs its own resource:** OCI's IPv4 and IPv6 reservation are unrelated mechanisms. `oci_core_public_ip` (IPv4) creates a separate public IP *object* that attaches to an existing private IP - the private IP itself never changes. `oci_core_ipv6`, by contrast, *is* the address itself, directly on the VNIC - there's no separate "public IPv6 object" layered on top. That's why the instance's `assign_ipv6ip` is turned off when reserving: creating `oci_core_ipv6` with `lifetime = "RESERVED"` is what actually gets your instance its IPv6 address in that case, rather than layering a reservation on top of an auto-assigned ephemeral one.
 
 ## 9. `storage.tf`
 
-Creates a private Object Storage bucket for your data and a second one for Terraform state, caps usage at the Always Free allowance, lets the VM use the bucket without API keys stored on it, and creates a dedicated bucket-only user for other clients.
+Creates a private Object Storage bucket for your data and a second one for OpenTofu state, caps usage at the Always Free allowance, lets the VM use the bucket without API keys stored on it, and creates a dedicated bucket-only user for other clients.
 
 The key thing to understand is that **the 20 GB is not allocated to anything.** A bucket has no size; it grows with whatever you put in it. Always Free covers the first 20 GB stored in the tenancy (Standard, Infrequent Access, and Archive combined), and anything beyond that is billed. So the data bucket can use practically all 20 GB, the state bucket takes a few KB of it, and the quota stops you from going over.
 
@@ -233,7 +240,7 @@ Newly created dynamic groups and policies can take a few minutes to take effect,
 - **`oci_identity_group.bucket_client`** and **`oci_identity_user_group_membership.bucket_client`** - a group containing the user, which is what the policy grants access to.
 - **`oci_identity_policy.bucket_client`** - the same two bucket-only statements the VM gets.
 
-Terraform doesn't create the user's API key. You add it by hand after `apply`, the same way you did for your own user in section 3, so no key material ends up in `terraform.tfstate` and `plan` doesn't depend on a key file being present. First generate the key pair:
+OpenTofu doesn't create the user's API key. You add it by hand after `apply`, the same way you did for your own user in section 3, so no key material ends up in `terraform.tfstate` and `plan` doesn't depend on a key file being present. First generate the key pair:
 
 **Linux / macOS:**
 
@@ -309,11 +316,11 @@ config_profile = bucket-client
 
 Then, for example: `rclone sync ./photos oci-bucket:bucket-free/photos` or `rclone ls oci-bucket:bucket-free`.
 
-Some tools speak only S3, for example restic, most NAS backup apps, and `aws s3`. For those, create a **Customer Secret Key** by hand for this user: Identity → Users → `bucket-free-client` → **Customer secret keys**. Then point the tool at the `bucket_s3_endpoint` output. This key is deliberately *not* managed by Terraform, because its secret would be stored in plaintext in the state file. The policy above already covers it, and a user can have at most two of these keys.
+Some tools speak only S3, for example restic, most NAS backup apps, and `aws s3`. For those, create a **Customer Secret Key** by hand for this user: Identity → Users → `bucket-free-client` → **Customer secret keys**. Then point the tool at the `bucket_s3_endpoint` output. This key is deliberately *not* managed by OpenTofu, because its secret would be stored in plaintext in the state file. The policy above already covers it, and a user can have at most two of these keys.
 
 ## 10. `outputs.tf`
 
-What `terraform apply` prints when it finishes (and what `terraform output` replays later).
+What `tofu apply` prints when it finishes (and what `tofu output` replays later).
 
 | Output | Value |
 | --- | --- |
@@ -345,35 +352,62 @@ Add `terraform.tfvars` to `.gitignore` - it now holds your private key path and 
 ## 12. Running it
 
 ```bash
-terraform init      # downloads the OCI provider
-terraform plan       # shows exactly what will be created - review before applying
-terraform apply       # creates everything; type "yes" to confirm
+tofu init    # downloads the OCI provider
+tofu plan    # shows exactly what will be created - review before applying
+tofu apply   # creates everything; type "yes" to confirm
 ```
 
 To tear it all down later:
 
 ```bash
-terraform destroy
+tofu destroy
 ```
 
-Terraform figures out the correct dependency order automatically (subnet → IGW → route table → security list → VCN, in reverse of creation).
+OpenTofu figures out the correct dependency order automatically (subnet → IGW → route table → security list → VCN, in reverse of creation).
+
+### 12.1. Migrating existing Terraform state to OpenTofu
+
+If you already deployed this stack with Terraform, OpenTofu can take over the existing local `terraform.tfstate`. Back it up first, because once `tofu apply` writes the state, you shouldn't go back to Terraform with it:
+
+```bash
+cp terraform.tfstate terraform.tfstate.pre-tofu
+rm -rf .terraform    # provider binaries downloaded by Terraform
+tofu init
+tofu plan
+```
+
+If you kept an older `.terraform.lock.hcl` that lists `registry.terraform.io/oracle/oci`, delete it before `tofu init`. The one in this repository already targets OpenTofu's registry.
+
+`tofu plan` should report **No changes**. That's the real compatibility check, because OpenTofu doesn't document compatibility with state written by the newest Terraform releases (1.12 and later). If `plan` complains about the provider address instead, point the state at OpenTofu's registry and run `plan` again:
+
+```bash
+tofu state replace-provider registry.terraform.io/oracle/oci registry.opentofu.org/oracle/oci
+```
+
+If you use the remote backend from section 15 with Terraform's native `oci` backend, switch it to the `s3` backend described there. OpenTofu doesn't have an `oci` backend. Move the state back to local with Terraform first (`terraform init -migrate-state` after deleting `backend.tf`), then follow this section and section 15.
+
+The committed `.terraform.lock.hcl` already pins `registry.opentofu.org/oracle/oci` with hashes for Linux, macOS (Apple silicon), and Windows. If you bump the provider, refresh the hashes for all three:
+
+```bash
+tofu providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=windows_amd64
+```
 
 ## 13. Adopting an already-existing VM instead of creating a new one
 
-If you already created the VCN/subnet/instance some other way (e.g. by hand in the console, or with separate scripts) **before** running `terraform apply` for the first time, don't just run `apply` - Terraform has no record of those resources yet, so `plan` will propose creating everything from scratch. Applying that as-is risks a duplicate instance, a `hostname_label` conflict in the subnet, or - since Always Free Ampere A1 is capped at 2 OCPU/12GB **total** - pushing you over the free-tier quota if your existing VM is already using it.
+If you already created the VCN/subnet/instance some other way (e.g. by hand in the console, or with separate scripts) **before** running `tofu apply` for the first time, don't just run `apply` - OpenTofu has no record of those resources yet, so `plan` will propose creating everything from scratch. Applying that as-is risks a duplicate instance, a `hostname_label` conflict in the subnet, or - since Always Free Ampere A1 is capped at 2 OCPU/12GB **total** - pushing you over the free-tier quota if your existing VM is already using it.
 
-Instead, **import** the existing resources into Terraform's state so it manages what's already there rather than creating new copies:
+Instead, **import** the existing resources into OpenTofu's state so it manages what's already there rather than creating new copies:
 
 ```bash
-terraform import oci_core_vcn.this [existing-vcn-ocid]
-terraform import oci_core_internet_gateway.this [existing-igw-ocid]
-terraform import oci_core_route_table.this [existing-route-table-ocid]
-terraform import oci_core_security_list.this [existing-security-list-ocid]
-terraform import oci_core_subnet.this [existing-subnet-ocid]
-terraform import oci_core_instance.this [existing-instance-ocid]
-terraform import oci_core_public_ip.reserved_ipv4[0] [existing-reserved-ip-ocid]   # only if you already have a reserved IP
-terraform import oci_objectstorage_bucket.this n/[namespace]/b/[bucket-name]       # only if the bucket already exists
-terraform import oci_objectstorage_bucket.state n/[namespace]/b/[state-bucket-name] # only if the state bucket already exists
+tofu import oci_core_vcn.this [existing-vcn-ocid]
+tofu import oci_core_internet_gateway.this [existing-igw-ocid]
+tofu import oci_core_route_table.this [existing-route-table-ocid]
+tofu import oci_core_security_list.this [existing-security-list-ocid]
+tofu import oci_core_subnet.this [existing-subnet-ocid]
+tofu import oci_core_instance.this [existing-instance-ocid]
+tofu import oci_core_public_ip.reserved_ipv4[0] [existing-reserved-ip-ocid]   # only if you already have a reserved IP
+tofu import oci_objectstorage_bucket.this n/[namespace]/b/[bucket-name]       # only if the bucket already exists
+tofu import oci_objectstorage_bucket.state n/[namespace]/b/[state-bucket-name] # only if the state bucket already exists
 ```
 
 Find each OCID either in the console (each resource's details page) or via the CLI, e.g.:
@@ -406,7 +440,7 @@ The internet gateway, route table, security list, and subnet commands all need `
 - **`storage_tier`** - can't be changed after a bucket is created. If the existing bucket isn't `Standard`, `plan` shows it as **must be replaced**, which would delete the bucket and everything in it. Don't apply that. Change `storage_tier` in `storage.tf` to match the bucket instead.
 - **`versioning`** - a bucket that has ever had versioning enabled can only be `Suspended`, never `Disabled` again, so applying `Disabled` fails. For such a bucket, set `versioning = "Suspended"` in `storage.tf`. This stops new versions from being kept, but the previous versions already stored remain and still count toward the 20 GB until you delete them.
 
-**Skip the `oci_core_public_ip` import** if you haven't reserved an IPv4 yet - leave `reserve_public_ip = true` and Terraform will create one fresh on `apply` instead. Importing is only for adopting one that already exists (e.g. if you ran a reservation step outside Terraform earlier); if you skip it while one already exists, `plan` will propose creating a second reserved IP.
+**Skip the `oci_core_public_ip` import** if you haven't reserved an IPv4 yet - leave `reserve_public_ip = true` and OpenTofu will create one fresh on `apply` instead. Importing is only for adopting one that already exists (e.g. if you ran a reservation step outside OpenTofu earlier); if you skip it while one already exists, `plan` will propose creating a second reserved IP.
 
 **Not sure whether your current IP is actually reserved?** The `oci network public-ip list` command above only searches `--scope REGION`, which is where *reserved* IPs live - an ephemeral IP won't show up there at all, so an empty result doesn't necessarily mean nothing exists. Check the ephemeral scope too before concluding there's nothing to import:
 
@@ -414,9 +448,9 @@ The internet gateway, route table, security list, and subnet commands all need `
 oci network public-ip list --compartment-id [compartment-ocid] --scope AVAILABILITY_DOMAIN --availability-domain [your_availability_domain] --query 'data[].{IP:"ip-address", Lifetime:lifetime, OCID:id}' --output table
 ```
 
-If your instance's IP shows up here with `Lifetime: EPHEMERAL`, there's genuinely nothing reserved to import - proceed as above and let Terraform create one. Don't rely on the console's IP lifetime label alone to decide; it can be stale (e.g. after a VNIC change), so treat this CLI query as the authoritative check. One thing worth knowing before applying in that case: reserving an already-running ephemeral IP through Terraform doesn't guarantee you keep the *same* address - OCI may assign a different one when the new reserved object is created, so double check any DNS records or bookmarks pointing at the old IP afterward.
+If your instance's IP shows up here with `Lifetime: EPHEMERAL`, there's genuinely nothing reserved to import - proceed as above and let OpenTofu create one. Don't rely on the console's IP lifetime label alone to decide; it can be stale (e.g. after a VNIC change), so treat this CLI query as the authoritative check. One thing worth knowing before applying in that case: reserving an already-running ephemeral IP through OpenTofu doesn't guarantee you keep the *same* address - OCI may assign a different one when the new reserved object is created, so double check any DNS records or bookmarks pointing at the old IP afterward.
 
-**After each import, run `terraform plan`.** It will show a diff between the real, already-deployed resource and what your `.tf` files currently describe (a `plan` after import never proposes destroying/recreating on its own — it just shows drift). Adjust the values in your `.tf`/`terraform.tfvars` files — not the actual infrastructure — until `plan` reports no changes for that resource. That confirms Terraform's config now accurately matches what's really running.
+**After each import, run `tofu plan`.** It will show a diff between the real, already-deployed resource and what your `.tf` files currently describe (a `plan` after import never proposes destroying/recreating on its own — it just shows drift). Adjust the values in your `.tf`/`terraform.tfvars` files — not the actual infrastructure — until `plan` reports no changes for that resource. That confirms OpenTofu's config now accurately matches what's really running.
 
 A few things likely to need adjusting after import:
 
@@ -425,16 +459,16 @@ A few things likely to need adjusting after import:
 - `ocpus` / `memory_in_gbs` / `boot_volume_size_gb` — match the instance's real shape config
 - The security list's rule set — if you added custom rules by hand (like the ICMP ones), the generated `network.tf` needs to include them too, or `plan` will keep showing a diff trying to remove them
 
-The image data source (`data.oci_core_images.ubuntu_aarch64`) never needs importing — it's a lookup, not a managed resource. Note that it always resolves to the *newest* matching image, which is exactly why the `lifecycle.ignore_changes` block in section 8's `compute.tf` exists — without it, Terraform would try to replace your instance the moment a newer Ubuntu 24.04 aarch64 image gets published.
+The image data source (`data.oci_core_images.ubuntu_aarch64`) never needs importing — it's a lookup, not a managed resource. Note that it always resolves to the *newest* matching image, which is exactly why the `lifecycle.ignore_changes` block in section 8's `compute.tf` exists — without it, OpenTofu would try to replace your instance the moment a newer Ubuntu 24.04 aarch64 image gets published.
 
 ## 14. The "Out of capacity" problem
 
-Ampere A1 is in high demand, and `terraform apply` fails immediately on `Out of capacity` errors - it does **not** retry automatically. A couple of ways to handle it:
+Ampere A1 is in high demand, and `tofu apply` fails immediately on `Out of capacity` errors - it does **not** retry automatically. A couple of ways to handle it:
 
-**Simplest - wrap `terraform apply` in a shell loop:**
+**Simplest - wrap `tofu apply` in a shell loop:**
 
 ```bash
-until terraform apply -auto-approve; do
+until tofu apply -auto-approve; do
   echo "Apply failed (likely capacity) - retrying in 60s..."
   sleep 60
 done
@@ -443,58 +477,120 @@ done
 **Or scope retries to just the instance**, once network resources already exist:
 
 ```bash
-until terraform apply -auto-approve -target=oci_core_instance.this; do
+until tofu apply -auto-approve -target=oci_core_instance.this; do
   sleep 60
 done
-terraform apply -auto-approve   # picks up the rest (reserved IP, etc.)
+tofu apply -auto-approve   # picks up the rest (reserved IP, etc.)
 ```
 
 ## 15. State file - a word of caution
 
-`terraform.tfstate` will contain sensitive details about your infrastructure (OCIDs, IPs, etc.) in plain text. Keep it out of git (`echo "*.tfstate*" >> .gitignore`). To run Terraform from more than one machine, or simply not lose the state with your laptop, move it into the `bucket-free-state` bucket that `storage.tf` creates.
+`terraform.tfstate` will contain sensitive details about your infrastructure (OCIDs, IPs, etc.) in plain text. Keep it out of git (`echo "*.tfstate*" >> .gitignore`). To run OpenTofu from more than one machine, or simply not lose the state with your laptop, move it into the `bucket-free-state` bucket that `storage.tf` creates.
 
-The bucket has to exist before Terraform can store state in it, so this is a two-step process: run `terraform apply` once with local state as usual (sections 12-13), then switch backends. This uses Terraform's native `oci` backend, which needs **Terraform 1.12 or newer** (`terraform -version`) and also handles state locking.
+The bucket has to exist before OpenTofu can store state in it, so this is a two-step process: run `tofu apply` once with local state as usual (sections 12-13), then switch backends.
+
+OpenTofu has no native `oci` backend (Terraform 1.12+ has one, OpenTofu doesn't), so this uses OpenTofu's `s3` backend pointed at OCI's [Amazon S3 Compatibility API](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm). It needs **OpenTofu 1.10 or newer** for lock files in the bucket.
+
+### 15.1. Create a Customer Secret Key for your own user
+
+The S3 API doesn't accept API signing keys. It authenticates with a **Customer Secret Key**, an access key / secret key pair. Create one for **your own admin user**: Profile → My profile → **Customer secret keys** → **Generate secret key**. Copy the secret right away, because the console shows it only once. The access key appears in the list afterwards.
+
+Don't use the `bucket-free-client` user from section 9. Its policy covers only the data bucket, on purpose, so it can't read or write state. Like that user's keys, this one is created by hand rather than in `storage.tf`, so the secret never lands in the state file it protects. A user can have at most two Customer Secret Keys.
+
+The S3 API only sees buckets in the tenancy's designated S3 compartment, which is the root compartment unless you changed it (Tenancy details → **Edit Object Storage settings**). With `compartment_id` set to the tenancy OCID, as in section 11, `bucket-free-state` is already there.
+
+### 15.2. Configure the backend
 
 Create `backend.tf` next to the other `.tf` files:
 
 ```hcl
 terraform {
-  backend "oci" {
+  backend "s3" {
     bucket = "bucket-free-state"
     key    = "terraform.tfstate"
+
+    # OCI's S3 Compatibility API isn't AWS: path-style URLs only, no AWS account
+    # or metadata service, and no support for the newer checksum headers
+    use_path_style              = true
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+
+    use_lockfile = true # see the locking caveat below
   }
 }
 ```
 
-Backend blocks can't read variables, so the remaining settings go in `oci.tfbackend`, which is in `.gitignore`. Use the same values as `terraform.tfvars`, plus the `object_storage_namespace` output:
+Backend blocks can't read variables, so the account-specific settings go in `oci.tfbackend`, which is in `.gitignore`. Take `<namespace>` from the `object_storage_namespace` output (the `bucket_s3_endpoint` output is the full endpoint URL) and the region from `terraform.tfvars`:
 
 ```hcl
-namespace        = "<object_storage_namespace>"
-region           = "sa-saopaulo-1"
-tenancy_ocid     = "ocid1.tenancy.oc1..your-tenancy-ocid"
-user_ocid        = "ocid1.user.oc1..your-user-ocid"
-fingerprint      = "xx:xx:xx:xx:...your-key-fingerprint"
-private_key_path = "/home/you/.oci/api_key.pem"
+region     = "sa-saopaulo-1"
+endpoints  = { s3 = "https://<namespace>.compat.objectstorage.sa-saopaulo-1.oraclecloud.com" }
+access_key = "<customer-secret-key-access-key>"
+secret_key = "<customer-secret-key-secret>"
 ```
 
-Write `private_key_path` as a full path, since `pathexpand()` (section 5) isn't available in backend settings. On Windows, use forward slashes, for example `C:/Users/you/.oci/api_key.pem`.
+If you'd rather not keep the secret in a file, leave out `access_key` and `secret_key` and export `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` before running `tofu`. Either way, `tofu init` caches the backend settings it was given in `.terraform/`, which is also in `.gitignore`.
+
+**Locking caveat:** `use_lockfile` creates `terraform.tfstate.tflock` next to the state with a conditional write (`If-None-Match`). OCI doesn't document support for conditional writes on its S3 API, so don't assume the lock actually protects you. Treat the state as single-writer: never run two `apply`s at once. To check, start a `tofu apply` and, while it waits at the confirmation prompt, run `tofu plan` from another terminal. If the second command reports that the state is locked, locking works.
+
+### 15.3. Migrate the state
 
 Then migrate the existing state into the bucket:
 
 ```bash
-terraform init -backend-config=oci.tfbackend -migrate-state
+tofu init -backend-config=oci.tfbackend -migrate-state
 ```
 
-`-migrate-state` copies the local state into the bucket automatically; only if it prompts about migrating workspace state (it doesn't for the single default workspace) answer `yes`, or add `-force-copy` to pre-answer it - that also keeps the command safe to run non-interactively. Run `terraform plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `oci.tfbackend` and run `terraform init -backend-config=oci.tfbackend` - no `-migrate-state` needed when there's no existing local state (passing it would be harmless).
+`-migrate-state` copies the local state into the bucket automatically; only if it prompts about migrating workspace state (it doesn't for the single default workspace) answer `yes`, or add `-force-copy` to pre-answer it - that also keeps the command safe to run non-interactively. Run `tofu plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `oci.tfbackend` and run `tofu init -backend-config=oci.tfbackend` - no `-migrate-state` needed when there's no existing local state (passing it would be harmless).
 
-To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get -bn bucket-free-state --name terraform.tfstate --version-id [id] --file terraform.tfstate.restored`. Don't write it straight to `terraform.tfstate` - restore it through the backend (e.g. `terraform state push terraform.tfstate.restored`) rather than uploading it over the live state object, so the version history stays intact.
+To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get -bn bucket-free-state --name terraform.tfstate --version-id [id] --file terraform.tfstate.restored`. Don't write it straight to `terraform.tfstate` - restore it through the backend (e.g. `tofu state push terraform.tfstate.restored`) rather than uploading it over the live state object, so the version history stays intact.
 
-**Before `terraform destroy`**, move the state back to local first. Otherwise destroy removes everything else and then fails on the state bucket, which still holds the state:
+**Before `tofu destroy`**, move the state back to local first. Otherwise destroy removes everything else and then fails on the state bucket, which still holds the state:
 
 ```bash
 # delete or rename backend.tf, then:
-terraform init -migrate-state
-terraform destroy
+tofu init -migrate-state
+tofu destroy
 ```
 
 Even with local state, destroy can only delete `bucket-free-state` once it's empty, including old object versions. Empty it in the console first (Buckets → `bucket-free-state` → Objects, with **Show deleted objects** on).
+
+### 15.4. Optional: encrypt the state
+
+OpenTofu can encrypt state and plan files client-side, so neither the local `terraform.tfstate` nor the copy in the bucket is readable without a passphrase. It's opt-in. Create `encryption.tf`:
+
+```hcl
+variable "state_passphrase" {
+  type      = string
+  sensitive = true
+}
+
+terraform {
+  encryption {
+    key_provider "pbkdf2" "main" {
+      passphrase = var.state_passphrase # at least 16 characters
+    }
+    method "aes_gcm" "main" {
+      keys = key_provider.pbkdf2.main
+    }
+    method "unencrypted" "migrate" {}
+
+    state {
+      method = method.aes_gcm.main
+      fallback {
+        method = method.unencrypted.migrate # lets tofu read the existing plaintext state once
+      }
+    }
+    plan {
+      method = method.aes_gcm.main
+    }
+  }
+}
+```
+
+`tofu` prints a warning about the `unencrypted` method while it's configured; that's expected during the migration. Supply the passphrase through the environment rather than `terraform.tfvars`, for example `export TF_VAR_state_passphrase='...'`, and keep it in your password manager. Run `tofu apply` once so the state is rewritten encrypted, then delete the `fallback` block and the `unencrypted` method so a plaintext state is never accepted again.
+
+**Losing the passphrase means losing the state.** OCI can't recover it, and the bucket's old versions written after the switch are encrypted too. Encrypted state also can't be read by Terraform or by tools that parse state files.
