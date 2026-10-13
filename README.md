@@ -1,6 +1,6 @@
 # OCI Free Tier Configuration
 
-A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with OpenTofu - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, a second bucket for remote OpenTofu state, and optionally DNS labels, IPv6, and a reserved public IP.
+A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with OpenTofu - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, a second bucket for remote OpenTofu state, DNS labels, and reserved (fixed) public IPv4 and IPv6 addresses.
 
 ---
 
@@ -134,7 +134,7 @@ The provider block is fully self-contained: it never reads `~/.oci/config`, so i
 
 ## 6. `variables.tf`
 
-Every input the configuration takes. Six have no default and must be supplied in `terraform.tfvars`; the rest are tuned for the Always Free tier and only need changing if you want something different.
+Every input the configuration takes. Four have no default and must be supplied in `terraform.tfvars`; the rest are tuned for the Always Free tier and only need changing if you want something different.
 
 **Required - no defaults:**
 
@@ -152,18 +152,11 @@ Every input the configuration takes. Six have no default and must be supplied in
 | `private_key_path` | string | `~/.oci/api_key.pem` | Path to the API signing private key; `~` is expanded |
 | `availability_domain` | string | `tWkk:SA-SAOPAULO-1-AD-1` | Target Availability Domain |
 | `region` | string | `sa-saopaulo-1` | Target Region |
-| `vcn_cidr` | string | `10.0.0.0/24` | VCN CIDR; the subnet reuses it verbatim |
-| `vcn_name` | string | `vcn-free-public` | VCN display name; also prefixes the IGW/route table/security list names |
-| `subnet_name` | string | `subnet-free-public` | Subnet display name |
-| `enable_ipv6` | bool | `true` | Adds IPv6 to the VCN, subnet, routes, and security rules |
-| `vcn_dns_label` | string | `vcnfree` | VCN DNS label; empty string disables DNS |
-| `subnet_dns_label` | string | `subnetfree` | Subnet DNS label; empty string disables DNS |
 | `instance_display_name` | string | `vm-ampere-free` | Instance name, `hostname_label`, and reserved-IP name prefix |
 | `ocpus` | number | `2` | OCPUs - the Always Free ceiling |
 | `memory_in_gbs` | number | `12` | RAM - the Always Free ceiling |
 | `boot_volume_size_gb` | number | `50` | Boot volume size |
-| `ssh_public_key_path` | string | `~/.ssh/id_rsa.pub` | SSH public key injected into the instance; `~` is expanded |
-| `reserve_public_ip` | bool | `true` | Reserve the public IPv4 (and IPv6) instead of letting OCI assign ephemeral ones |
+| `ssh_public_key_path` | string | `~/.ssh/id_ed25519.pub` | SSH public key injected into the instance; `~` is expanded |
 | `bucket_name` | string | `bucket-free` | Object Storage bucket name |
 | `state_bucket_name` | string | `bucket-free-state` | Bucket that holds the remote OpenTofu state (section 15) |
 | `object_storage_quota_gb` | number | `20` | Object Storage quota in GB - the Always Free ceiling |
@@ -177,30 +170,30 @@ Every input the configuration takes. Six have no default and must be supplied in
 
 ## 7. `network.tf`
 
-Creates the VCN, internet gateway, route table, security list, and public subnet. IPv6 support is threaded through all five via `dynamic` blocks keyed on `var.enable_ipv6`, so flipping that one variable adds or removes the whole IPv6 path.
+Creates the VCN, internet gateway, route table, security list, and public subnet, all dual-stack (IPv4 and IPv6). Names, the CIDR, and the DNS labels are written directly in the file rather than exposed as variables.
 
-- **`oci_core_vcn.this`** - the VCN, at `var.vcn_cidr`, with `is_ipv6enabled` following `enable_ipv6`. A blank `vcn_dns_label` is converted to `null` so DNS can be turned off cleanly.
-- **`oci_core_internet_gateway.this`** - an enabled IGW named `<vcn_name>-igw`.
-- **`oci_core_route_table.this`** - a default route `0.0.0.0/0` to the IGW, plus a `::/0` rule added dynamically when IPv6 is on.
-- **`oci_core_security_list.this`** - egress open to everything (`0.0.0.0/0`, plus `::/0` when enabled). Ingress opens SSH/HTTP/HTTPS (22, 80, 443) over TCP and ICMP echo for ping, and the same set is emitted again for IPv6 - protocol `58` (ICMPv6) with `type = 128` instead of protocol `1` / `type = 8`.
-- **`oci_core_subnet.this`** - a public subnet (`prohibit_public_ip_on_vnic = false`) that reuses the full VCN CIDR. Its IPv6 range is carved out with `cidrsubnet(oci_core_vcn.this.ipv6cidr_blocks[0], 8, 0)`, giving the first /64 of the VCN's assigned /56.
+- **`oci_core_vcn.this`** - the VCN `vcn-free-public` at `10.0.0.0/24`, with `is_ipv6enabled` (OCI assigns it a /56) and DNS label `vcnfree`.
+- **`oci_core_internet_gateway.this`** - an enabled IGW named `vcn-free-public-igw`.
+- **`oci_core_route_table.this`** - default routes `0.0.0.0/0` and `::/0` to the IGW.
+- **`oci_core_security_list.this`** - egress open to everything (`0.0.0.0/0` and `::/0`). Ingress opens SSH/HTTP/HTTPS (22, 80, 443) over TCP from both, plus ping: protocol `1` / `type = 8` for IPv4 and protocol `58` (ICMPv6) / `type = 128` for IPv6.
+- **`oci_core_subnet.this`** - the public subnet `subnet-free-public` (DNS label `subnetfree`) that reuses the full VCN CIDR. Its IPv6 range is carved out with `cidrsubnet(oci_core_vcn.this.ipv6cidr_blocks[0], 8, 0)`, giving the first /64 of the VCN's /56.
 
-The TCP ingress rules are generated from a `{ ssh = 22, http = 80, https = 443 }` map, so opening another port is a one-line change to that map rather than a new hand-written block. If you add rules by hand in the console instead, `plan` will keep proposing to remove them - see section 13.
+The TCP ingress rules are generated with `setproduct()` from the two source CIDRs and a `[22, 80, 443]` port list, so opening another port is a one-line change to that list rather than a new hand-written block. If you add rules by hand in the console instead, `plan` will keep proposing to remove them - see section 13.
 
 ## 8. `compute.tf`
 
-Creates the A1 instance and, optionally, its reserved public IPs. IPv4 and IPv6 reservation use entirely different OCI resources - see the note at the end of this section.
+Creates the A1 instance and its reserved public IPs. IPv4 and IPv6 reservation use entirely different OCI resources - see the note at the end of this section.
 
 - **`data.oci_core_images.ubuntu_aarch64`** - looks up the newest Canonical Ubuntu 24.04 image built for `VM.Standard.A1.Flex` (aarch64), sorted by creation time descending, and takes `images[0]`.
 - **`oci_core_instance.this`** - the VM itself: shape `VM.Standard.A1.Flex` sized by `ocpus`/`memory_in_gbs`, booting the image above at `boot_volume_size_gb`. Its VNIC gets a public IPv4 and a `hostname_label`; your SSH public key is injected through `metadata.ssh_authorized_keys`.
-- **`data.oci_core_private_ips.instance_private_ip`** - resolves the instance's private IP to the private-IP OCID that a reserved public IPv4 has to attach to.
-- **`oci_core_public_ip.reserved_ipv4`** - created only when `reserve_public_ip` is true; a `RESERVED` public IPv4 that survives stop/start.
-- **`data.oci_core_vnic_attachments.instance_vnics`** - finds the instance's VNIC, needed by the IPv6 resource below.
-- **`oci_core_ipv6.reserved_ipv6`** - created only when `enable_ipv6` *and* `reserve_public_ip` are both true; a `RESERVED` IPv6 address on that VNIC.
+- **`data.oci_core_vnic_attachments.instance_vnics`** - finds the instance's VNIC, needed by both reserved IPs.
+- **`data.oci_core_private_ips.instance_private_ip`** - resolves that VNIC's private IP to the private-IP OCID that a reserved public IPv4 has to attach to.
+- **`oci_core_public_ip.reserved_ipv4`** - a `RESERVED` public IPv4. Ephemeral public IPs already survive stop/start in OCI; a reserved one also survives the instance being terminated and recreated, and can be moved to a new one.
+- **`oci_core_ipv6.reserved_ipv6`** - a `RESERVED` IPv6 address on that VNIC.
 
 Two details in this file are easy to break:
 
-**`assign_ipv6ip` is deliberately `var.enable_ipv6 && !var.reserve_public_ip`.** The instance auto-assigns an ephemeral IPv6 only when you are *not* reserving one; the reserved path creates the address through `oci_core_ipv6` instead. The two are mutually exclusive, not additive.
+**`assign_ipv6ip` is deliberately `false`.** The instance's IPv6 address is created by `oci_core_ipv6` instead; auto-assigning one too would give the VNIC a second, ephemeral IPv6.
 
 **The `lifecycle.ignore_changes` block is load-bearing.** It ignores:
 
@@ -209,7 +202,7 @@ Two details in this file are easy to break:
 
 Without it, OpenTofu proposes destroying and recreating a live instance every time Canonical publishes a new 24.04 image.
 
-**Why IPv6 needs its own resource:** OCI's IPv4 and IPv6 reservation are unrelated mechanisms. `oci_core_public_ip` (IPv4) creates a separate public IP *object* that attaches to an existing private IP - the private IP itself never changes. `oci_core_ipv6`, by contrast, *is* the address itself, directly on the VNIC - there's no separate "public IPv6 object" layered on top. That's why the instance's `assign_ipv6ip` is turned off when reserving: creating `oci_core_ipv6` with `lifetime = "RESERVED"` is what actually gets your instance its IPv6 address in that case, rather than layering a reservation on top of an auto-assigned ephemeral one.
+**Why IPv6 needs its own resource:** OCI's IPv4 and IPv6 reservation are unrelated mechanisms. `oci_core_public_ip` (IPv4) creates a separate public IP *object* that attaches to an existing private IP - the private IP itself never changes. `oci_core_ipv6`, by contrast, *is* the address itself, directly on the VNIC - there's no separate "public IPv6 object" layered on top. That's why the instance's `assign_ipv6ip` is off: creating `oci_core_ipv6` with `lifetime = "RESERVED"` is what actually gets your instance its IPv6 address, rather than layering a reservation on top of an auto-assigned ephemeral one.
 
 ## 9. `storage.tf`
 
@@ -218,8 +211,8 @@ Creates a private Object Storage bucket for your data and a second one for OpenT
 The key thing to understand is that **the 20 GB is not allocated to anything.** A bucket has no size; it grows with whatever you put in it. Always Free covers the first 20 GB stored in the tenancy (Standard, Infrequent Access, and Archive combined), and anything beyond that is billed. So the data bucket can use practically all 20 GB, the state bucket takes a few KB of it, and the quota stops you from going over.
 
 - **`data.oci_objectstorage_namespace.this`** - looks up the tenancy's Object Storage namespace. Every bucket name and URL is scoped by this namespace.
-- **`oci_objectstorage_bucket.this`** - the bucket. It has `NoPublicAccess` (nothing is reachable without authentication) and the `Standard` tier. `versioning` is `Disabled` on purpose, because old object versions would silently count toward the 20 GB.
-- **`oci_objectstorage_bucket.state`** - holds `terraform.tfstate` once you switch to the remote backend (section 15). It's private and `Standard` like the data bucket, but `versioning` is `Enabled`: every state write keeps the previous version, so a bad apply can be rolled back. State files are a few KB, so the extra versions barely touch the 20 GB. Neither the VM nor the bucket client user gets access to it.
+- **`oci_objectstorage_bucket.this`** - the bucket. It has `NoPublicAccess` (nothing is reachable without authentication) and the default `Standard` tier. `versioning` is `Disabled` on purpose, because old object versions would silently count toward the 20 GB.
+- **`oci_objectstorage_bucket.state`** - holds `terraform.tfstate` once you switch to the remote backend (section 15). It's private and `Standard` like the data bucket, but `versioning` is `Enabled`: every state write keeps the previous version, so a bad apply can be rolled back. State files are a few KB, so the extra versions barely touch the 20 GB. Neither the VM nor the bucket client user gets access to it. It has `prevent_destroy`, so `tofu destroy` (or a change that would replace it) fails instead of deleting the state it holds; remove that block first if you really mean to delete it.
 - **`oci_limits_quota.object_storage`** - a quota policy, `set object-storage quota storage-bytes to <bytes> in tenancy`, with the byte count computed from `object_storage_quota_gb`. Once the limit is reached, uploads fail instead of being billed. The quota is regional, so it covers this `region`. Quota policies must be created in the **root compartment**, and creating one needs tenancy-admin rights. If your API user doesn't have those rights, set `enforce_object_storage_quota = false` and keep an eye on usage in the console.
 - **`oci_identity_dynamic_group.vm`** - a dynamic group whose matching rule is exactly this instance's OCID. It lives in the root compartment, like all dynamic groups.
 - **`oci_identity_policy.vm_bucket`** - allows that dynamic group to `read buckets` and `manage objects`, restricted by `target.bucket.name` to this one bucket.
@@ -324,17 +317,15 @@ What `tofu apply` prints when it finishes (and what `tofu output` replays later)
 
 | Output | Value |
 | --- | --- |
-| `instance_public_ip` | The reserved IPv4 when `reserve_public_ip` is true, otherwise the instance's ephemeral public IP |
+| `instance_public_ip` | The reserved public IPv4 |
 | `instance_private_ip` | The instance's private IP inside the subnet |
-| `instance_public_ipv6` | The reserved IPv6 address; or `"IPv6 not enabled"`; or a reminder to check the VNIC in the console when the address is ephemeral |
+| `instance_public_ipv6` | The reserved IPv6 address |
 | `object_storage_namespace` | The tenancy's Object Storage namespace |
 | `bucket_name` | The bucket's name |
 | `state_bucket_name` | The state bucket's name, for `backend.tf` |
 | `bucket_s3_endpoint` | `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, for S3-compatible tools |
 | `bucket_client_user_ocid` | The bucket client user's OCID, or `"bucket client access not enabled"` |
-| `fqdn` | `<instance>.<subnet_dns_label>.<vcn_dns_label>.oraclevcn.com`, or `"DNS labels not set"` if either label is blank |
-
-The IPv6 and FQDN outputs are conditional expressions rather than plain references, because the resources behind them may not exist at all depending on `enable_ipv6` and the DNS labels.
+| `fqdn` | `<instance>.subnetfree.vcnfree.oraclevcn.com`, the instance's name inside the VCN |
 
 ## 11. `terraform.tfvars`
 
@@ -405,7 +396,7 @@ tofu import oci_core_route_table.this [existing-route-table-ocid]
 tofu import oci_core_security_list.this [existing-security-list-ocid]
 tofu import oci_core_subnet.this [existing-subnet-ocid]
 tofu import oci_core_instance.this [existing-instance-ocid]
-tofu import oci_core_public_ip.reserved_ipv4[0] [existing-reserved-ip-ocid]   # only if you already have a reserved IP
+tofu import oci_core_public_ip.reserved_ipv4 [existing-reserved-ip-ocid]      # only if you already have a reserved IP
 tofu import oci_objectstorage_bucket.this n/[namespace]/b/[bucket-name]       # only if the bucket already exists
 tofu import oci_objectstorage_bucket.state n/[namespace]/b/[state-bucket-name] # only if the state bucket already exists
 ```
@@ -434,13 +425,13 @@ oci os bucket list --compartment-id [compartment-ocid] --query 'data[].{Name:nam
 
 The internet gateway, route table, security list, and subnet commands all need `--vcn-id`, so grab the VCN's OCID from the first command before running the rest.
 
-**The bucket is the one exception to importing by OCID.** Its import ID is `n/[namespace]/b/[bucket-name]`, built from the output of the last two commands: `oci os ns get` prints the namespace, and `oci os bucket list` shows the bucket names. Set `bucket_name` to match the existing bucket before importing. `access_type`, `storage_tier`, and `versioning` are fixed in `storage.tf`, so check how the existing bucket differs from them before you `apply`:
+**The bucket is the one exception to importing by OCID.** Its import ID is `n/[namespace]/b/[bucket-name]`, built from the output of the last two commands: `oci os ns get` prints the namespace, and `oci os bucket list` shows the bucket names. Set `bucket_name` to match the existing bucket before importing. `access_type` and `versioning` are fixed in `storage.tf`, so check how the existing bucket differs from them before you `apply`:
 
 - **`access_type`** - a mismatch is changed in place.
-- **`storage_tier`** - can't be changed after a bucket is created. If the existing bucket isn't `Standard`, `plan` shows it as **must be replaced**, which would delete the bucket and everything in it. Don't apply that. Change `storage_tier` in `storage.tf` to match the bucket instead.
+- **`storage_tier`** - not set in `storage.tf`, so an imported bucket keeps whatever tier it has (it can't be changed after creation anyway). New buckets get `Standard`.
 - **`versioning`** - a bucket that has ever had versioning enabled can only be `Suspended`, never `Disabled` again, so applying `Disabled` fails. For such a bucket, set `versioning = "Suspended"` in `storage.tf`. This stops new versions from being kept, but the previous versions already stored remain and still count toward the 20 GB until you delete them.
 
-**Skip the `oci_core_public_ip` import** if you haven't reserved an IPv4 yet - leave `reserve_public_ip = true` and OpenTofu will create one fresh on `apply` instead. Importing is only for adopting one that already exists (e.g. if you ran a reservation step outside OpenTofu earlier); if you skip it while one already exists, `plan` will propose creating a second reserved IP.
+**Skip the `oci_core_public_ip` import** if you haven't reserved an IPv4 yet - OpenTofu will create one fresh on `apply` instead. Importing is only for adopting one that already exists (e.g. if you ran a reservation step outside OpenTofu earlier); if you skip it while one already exists, `plan` will propose creating a second reserved IP.
 
 **Not sure whether your current IP is actually reserved?** The `oci network public-ip list` command above only searches `--scope REGION`, which is where *reserved* IPs live - an ephemeral IP won't show up there at all, so an empty result doesn't necessarily mean nothing exists. Check the ephemeral scope too before concluding there's nothing to import:
 
@@ -454,8 +445,7 @@ If your instance's IP shows up here with `Lifetime: EPHEMERAL`, there's genuinel
 
 A few things likely to need adjusting after import:
 
-- `vcn_cidr`, `vcn_name`, `subnet_name` — match whatever you actually used
-- `enable_ipv6` — set based on whether IPv6 was already added
+- The VCN/subnet CIDR, names, and DNS labels in `network.tf` — match whatever you actually used
 - `ocpus` / `memory_in_gbs` / `boot_volume_size_gb` — match the instance's real shape config
 - The security list's rule set — if you added custom rules by hand (like the ICMP ones), the generated `network.tf` needs to include them too, or `plan` will keep showing a diff trying to remove them
 

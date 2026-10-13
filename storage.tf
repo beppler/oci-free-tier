@@ -11,9 +11,8 @@ resource "oci_objectstorage_bucket" "this" {
   namespace      = data.oci_objectstorage_namespace.this.namespace
   name           = var.bucket_name
   access_type    = "NoPublicAccess"
-  storage_tier   = "Standard"
   # Keep off: previous object versions count toward the 20 GB Always Free limit
-  versioning     = "Disabled"
+  versioning = "Disabled"
 }
 
 # --- Remote OpenTofu state (see README section 15). Versioning is on here
@@ -24,8 +23,12 @@ resource "oci_objectstorage_bucket" "state" {
   namespace      = data.oci_objectstorage_namespace.this.namespace
   name           = var.state_bucket_name
   access_type    = "NoPublicAccess"
-  storage_tier   = "Standard"
   versioning     = "Enabled"
+
+  # Holds this config's own state: `tofu destroy` must not delete it
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # --- Hard cap: the 20 GB is a usage limit, not an allocation — anything

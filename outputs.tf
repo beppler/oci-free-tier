@@ -1,5 +1,5 @@
 output "instance_public_ip" {
-  value = var.reserve_public_ip ? oci_core_public_ip.reserved_ipv4[0].ip_address : oci_core_instance.this.public_ip
+  value = oci_core_public_ip.reserved_ipv4.ip_address
 }
 
 output "instance_private_ip" {
@@ -7,11 +7,7 @@ output "instance_private_ip" {
 }
 
 output "instance_public_ipv6" {
-  value = (
-    !var.enable_ipv6 ? "IPv6 not enabled" :
-    var.reserve_public_ip ? oci_core_ipv6.reserved_ipv6[0].ip_address :
-    "assigned (ephemeral) — check the instance's VNIC in the console for the address"
-  )
+  value = oci_core_ipv6.reserved_ipv6.ip_address
 }
 
 output "object_storage_namespace" {
@@ -35,5 +31,5 @@ output "bucket_client_user_ocid" {
 }
 
 output "fqdn" {
-  value = (var.vcn_dns_label != "" && var.subnet_dns_label != "") ? "${var.instance_display_name}.${var.subnet_dns_label}.${var.vcn_dns_label}.oraclevcn.com" : "DNS labels not set"
+  value = "${var.instance_display_name}.${oci_core_subnet.this.dns_label}.${oci_core_vcn.this.dns_label}.oraclevcn.com"
 }
