@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.10" # S3 backend native locking (use_lockfile), README section 15
+  required_version = ">= 1.10"
 
   required_providers {
     oci = {

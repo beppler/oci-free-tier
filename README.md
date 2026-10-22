@@ -1,6 +1,6 @@
 # OCI Free Tier Configuration
 
-A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with OpenTofu - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, a private Object Storage bucket capped at the 20 GB free allowance, a second bucket for remote OpenTofu state, DNS labels, and reserved (fixed) public IPv4 and IPv6 addresses.
+A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with OpenTofu - VCN, public subnet, internet gateway, route table, security list, the A1 instance itself, DNS labels, and reserved (fixed) public IPv4 and IPv6 addresses.
 
 ---
 
@@ -9,7 +9,7 @@ A guide to provisioning an Always Free Ampere A1 VM on Oracle Cloud with OpenTof
 - **State tracking**: OpenTofu remembers exactly what it created (`terraform.tfstate`) and can tell you what's changed or drifted, so you always know what's actually deployed.
 - **Idempotent by default**: `tofu apply` only changes what's different from the last run - safe to run repeatedly without worrying about duplicating resources.
 - **One place to see everything**: a handful of `.tf` files describe the whole stack, with resources referencing each other directly instead of you tracking OCIDs by hand.
-- **Trade-off**: less control over retry behavior - Ampere A1 capacity errors ("Out of capacity") aren't retried automatically by OpenTofu (more on this in section 14).
+- **Trade-off**: less control over retry behavior - Ampere A1 capacity errors ("Out of capacity") aren't retried automatically by OpenTofu (more on this in section 13).
 
 ## 2. Install OpenTofu and set up the OCI provider
 
@@ -46,7 +46,7 @@ Verify it installed correctly in a new terminal window (winget updates `PATH`, b
 tofu -version
 ```
 
-If you already ran this configuration with Terraform, read section 12.1 before running any `tofu` command against your existing state.
+If you already ran this configuration with Terraform, read section 11.1 before running any `tofu` command against your existing state.
 
 Next, set up authentication - OpenTofu uses its own API key rather than reusing anything from the OCI CLI.
 
@@ -99,7 +99,7 @@ Both versions append an `OCI_API_KEY` line after the end of the private key. Thi
 - **Fingerprint** - from step 2 above
 - **Private key path** - `~/.oci/api_key.pem` is the default, so you only need to set `private_key_path` if you saved the key somewhere else
 
-Keep these somewhere safe (a password manager, not committed to git) - they go into `terraform.tfvars` in section 11.
+Keep these somewhere safe (a password manager, not committed to git) - they go into `terraform.tfvars` in section 10.
 
 ## 4. Project structure
 
@@ -109,23 +109,19 @@ Keep these somewhere safe (a password manager, not committed to git) - they go i
 ├── variables.tf           # every input and its default
 ├── network.tf             # VCN, IGW, route table, security list, subnet
 ├── compute.tf             # image lookup, A1 instance, reserved IPs
-├── storage.tf             # Object Storage buckets (data + state), 20 GB quota, VM + client access
 ├── outputs.tf             # what apply prints when it finishes
 ├── .gitattributes         # normalizes line endings to LF
-├── terraform.tfstate      # know current state - keep this out of git (until moved to the state bucket, section 15)
-├── backend.tf             # optional, you create it in section 15 - remote state in the state bucket
-├── oci.tfbackend          # optional, section 15 - S3 endpoint and Customer Secret Key, keep this out of git
-├── encryption.tf          # optional, section 15 - client-side state encryption
+├── terraform.tfstate      # know current state - keep this out of git
 └── terraform.tfvars       # your actual values - keep this out of git
 ```
 
-Sections 5-10 below describe what each file contains and why, rather than reproducing it. The files themselves are in this repository and are the authoritative version - read them alongside the descriptions when you want the exact HCL.
+Sections 5-9 below describe what each file contains and why, rather than reproducing it. The files themselves are in this repository and are the authoritative version - read them alongside the descriptions when you want the exact HCL.
 
 ## 5. `providers.tf`
 
 Pins the provider and normalizes the two filesystem paths OpenTofu needs.
 
-- **`terraform.required_version`** - requires OpenTofu 1.10 or newer, the first release with lock files for the `s3` backend (section 15).
+- **`terraform.required_version`** - requires OpenTofu 1.10 or newer.
 - **`terraform.required_providers`** - pins `oracle/oci` to `~> 7.0`. The 5.x line predates the `lifetime` argument on `oci_core_ipv6`, so reserved IPv6 (section 8) won't work on it.
 - **`locals`** - runs both `var.private_key_path` and `var.ssh_public_key_path` through `pathexpand()`, which resolves a leading `~` to the real home directory at apply time on Linux *and* Windows. This is why `~/...` paths in `terraform.tfvars` need no OS-specific quoting.
 - **`provider "oci"`** - wires tenancy, user, fingerprint, private key, and region straight from variables.
@@ -157,14 +153,6 @@ Every input the configuration takes. Four have no default and must be supplied i
 | `memory_in_gbs` | number | `12` | RAM - the Always Free ceiling |
 | `boot_volume_size_gb` | number | `50` | Boot volume size |
 | `ssh_public_key_path` | string | `~/.ssh/id_ed25519.pub` | SSH public key injected into the instance; `~` is expanded |
-| `bucket_name` | string | `bucket-free` | Object Storage bucket name |
-| `state_bucket_name` | string | `bucket-free-state` | Bucket that holds the remote OpenTofu state (section 15) |
-| `object_storage_quota_gb` | number | `20` | Object Storage quota in GB - the Always Free ceiling |
-| `enforce_object_storage_quota` | bool | `true` | Create the tenancy quota policy that enforces `object_storage_quota_gb` (needs tenancy admin) |
-| `bucket_vm_access` | bool | `true` | Let the VM use the bucket through instance principal (dynamic group + policy) |
-| `bucket_client_access` | bool | `true` | Create the dedicated bucket-only user, group, and policy for other clients |
-| `bucket_client_user_name` | string | `bucket-free-client` | That user's name; also prefixes its group and policy names |
-| `bucket_client_email` | string | `null` | Email for that user; needed only in tenancies whose identity domain requires one |
 
 `ocpus` and `memory_in_gbs` sit exactly on the Always Free cap of 2 OCPU / 12 GB **per tenancy**. Raising either one, or running a second A1 instance alongside this one, takes you off the free tier.
 
@@ -178,7 +166,7 @@ Creates the VCN, internet gateway, route table, security list, and public subnet
 - **`oci_core_security_list.this`** - egress open to everything (`0.0.0.0/0` and `::/0`). Ingress opens SSH/HTTP/HTTPS (22, 80, 443) over TCP from both, plus ping: protocol `1` / `type = 8` for IPv4 and protocol `58` (ICMPv6) / `type = 128` for IPv6.
 - **`oci_core_subnet.this`** - the public subnet `subnet-free-public` (DNS label `subnetfree`) that reuses the full VCN CIDR. Its IPv6 range is carved out with `cidrsubnet(oci_core_vcn.this.ipv6cidr_blocks[0], 8, 0)`, giving the first /64 of the VCN's /56.
 
-The TCP ingress rules are generated with `setproduct()` from the two source CIDRs and a `[22, 80, 443]` port list, so opening another port is a one-line change to that list rather than a new hand-written block. If you add rules by hand in the console instead, `plan` will keep proposing to remove them - see section 13.
+The TCP ingress rules are generated with `setproduct()` from the two source CIDRs and a `[22, 80, 443]` port list, so opening another port is a one-line change to that list rather than a new hand-written block. If you add rules by hand in the console instead, `plan` will keep proposing to remove them - see section 12.
 
 ## 8. `compute.tf`
 
@@ -204,114 +192,7 @@ Without it, OpenTofu proposes destroying and recreating a live instance every ti
 
 **Why IPv6 needs its own resource:** OCI's IPv4 and IPv6 reservation are unrelated mechanisms. `oci_core_public_ip` (IPv4) creates a separate public IP *object* that attaches to an existing private IP - the private IP itself never changes. `oci_core_ipv6`, by contrast, *is* the address itself, directly on the VNIC - there's no separate "public IPv6 object" layered on top. That's why the instance's `assign_ipv6ip` is off: creating `oci_core_ipv6` with `lifetime = "RESERVED"` is what actually gets your instance its IPv6 address, rather than layering a reservation on top of an auto-assigned ephemeral one.
 
-## 9. `storage.tf`
-
-Creates a private Object Storage bucket for your data and a second one for OpenTofu state, caps usage at the Always Free allowance, lets the VM use the bucket without API keys stored on it, and creates a dedicated bucket-only user for other clients.
-
-The key thing to understand is that **the 20 GB is not allocated to anything.** A bucket has no size; it grows with whatever you put in it. Always Free covers the first 20 GB stored in the tenancy (Standard, Infrequent Access, and Archive combined), and anything beyond that is billed. So the data bucket can use practically all 20 GB, the state bucket takes a few KB of it, and the quota stops you from going over.
-
-- **`data.oci_objectstorage_namespace.this`** - looks up the tenancy's Object Storage namespace. Every bucket name and URL is scoped by this namespace.
-- **`oci_objectstorage_bucket.this`** - the bucket. It has `NoPublicAccess` (nothing is reachable without authentication) and the default `Standard` tier. `versioning` is `Disabled` on purpose, because old object versions would silently count toward the 20 GB.
-- **`oci_objectstorage_bucket.state`** - holds `terraform.tfstate` once you switch to the remote backend (section 15). It's private and `Standard` like the data bucket, but `versioning` is `Enabled`: every state write keeps the previous version, so a bad apply can be rolled back. State files are a few KB, so the extra versions barely touch the 20 GB. Neither the VM nor the bucket client user gets access to it. It has `prevent_destroy`, so `tofu destroy` (or a change that would replace it) fails instead of deleting the state it holds; remove that block first if you really mean to delete it.
-- **`oci_limits_quota.object_storage`** - a quota policy, `set object-storage quota storage-bytes to <bytes> in tenancy`, with the byte count computed from `object_storage_quota_gb`. Once the limit is reached, uploads fail instead of being billed. The quota is regional, so it covers this `region`. Quota policies must be created in the **root compartment**, and creating one needs tenancy-admin rights. If your API user doesn't have those rights, set `enforce_object_storage_quota = false` and keep an eye on usage in the console.
-- **`oci_identity_dynamic_group.vm`** - a dynamic group whose matching rule is exactly this instance's OCID. It lives in the root compartment, like all dynamic groups.
-- **`oci_identity_policy.vm_bucket`** - allows that dynamic group to `read buckets` and `manage objects`, restricted by `target.bucket.name` to this one bucket.
-
-The dynamic group and policy are created only when `bucket_vm_access` is true. From your own machine you need nothing extra, because your API key already has access. On the VM, install the OCI CLI (for example, `pip install oci-cli`) and authenticate as the instance itself:
-
-```bash
-oci os object put  --auth instance_principal -bn bucket-free --file ./backup.tar.gz
-oci os object list --auth instance_principal -bn bucket-free
-```
-
-Newly created dynamic groups and policies can take a few minutes to take effect, so an early `NotAuthorizedOrNotFound` error usually just means you need to wait.
-
-**Access from other clients** (other machines, people, backup tools) uses a dedicated user instead of your admin key. These resources are created only when `bucket_client_access` is true:
-
-- **`oci_identity_user.bucket_client`** - the user, `bucket_client_user_name`, created in the root compartment. Some tenancies that use identity domains reject new users without an email address; if yours does, set `bucket_client_email`.
-- **`oci_identity_user_capabilities_management.bucket_client`** - limits the user to API keys and Customer Secret Keys, with no console password, auth tokens, or SMTP credentials.
-- **`oci_identity_group.bucket_client`** and **`oci_identity_user_group_membership.bucket_client`** - a group containing the user, which is what the policy grants access to.
-- **`oci_identity_policy.bucket_client`** - the same two bucket-only statements the VM gets.
-
-OpenTofu doesn't create the user's API key. You add it by hand after `apply`, the same way you did for your own user in section 3, so no key material ends up in `terraform.tfstate` and `plan` doesn't depend on a key file being present. First generate the key pair:
-
-**Linux / macOS:**
-
-```bash
-mkdir -p ~/.oci
-openssl genrsa -out ~/.oci/bucket_client_api_key.pem 2048
-openssl rsa -pubout -in ~/.oci/bucket_client_api_key.pem -out ~/.oci/bucket_client_api_key_public.pem
-echo "OCI_API_KEY" >> ~/.oci/bucket_client_api_key.pem
-chmod 600 ~/.oci/bucket_client_api_key.pem
-```
-
-**Windows (PowerShell 7.1+)** - the same .NET approach as section 3:
-
-```powershell
-mkdir "$env:USERPROFILE\.oci" -Force
-$rsa = [System.Security.Cryptography.RSA]::Create(2048)
-Set-Content -Path "$env:USERPROFILE\.oci\bucket_client_api_key.pem" -Value ($rsa.ExportRSAPrivateKeyPem() + "`nOCI_API_KEY`n") -NoNewline
-Set-Content -Path "$env:USERPROFILE\.oci\bucket_client_api_key_public.pem" -Value $rsa.ExportSubjectPublicKeyInfoPem() -NoNewline
-```
-
-Then upload the public key to the user, either in the console - Identity → Users → `bucket-free-client` → **API keys** → **Add API key** → **Paste public key**, as in section 3.2 - or with the OCI CLI, using the `bucket_client_user_ocid` output:
-
-```bash
-oci iam user api-key upload --user-id [bucket_client_user_ocid] --key-file ~/.oci/bucket_client_api_key_public.pem
-```
-
-Both show the key's **fingerprint**; copy it. A user can have at most three API keys, so you can give separate clients separate keys and revoke one without touching the others.
-
-Copy the private key to each client and point an OCI config profile at it, using the `bucket_client_user_ocid` output and that fingerprint:
-
-```ini
-[bucket-client]
-user        = <bucket_client_user_ocid>
-fingerprint = <api_key_fingerprint>
-tenancy     = <tenancy_ocid>
-region      = <region>
-key_file    = ~/.oci/bucket_client_api_key.pem
-```
-
-The profile goes in the OCI CLI's config file: `~/.oci/config` on Linux and macOS, `%USERPROFILE%\.oci\config` on Windows. Put it next to any profile you already have there. With that profile, the OCI CLI and SDKs work with `--profile bucket-client`:
-
-```bash
-# Upload, list, download, delete single objects
-oci os object put    --profile bucket-client -bn bucket-free --file ./backup.tar.gz
-oci os object put    --profile bucket-client -bn bucket-free --file ./backup.tar.gz --name backups/2026-09-28.tar.gz
-oci os object list   --profile bucket-client -bn bucket-free --prefix backups/
-oci os object get    --profile bucket-client -bn bucket-free --name backups/2026-09-28.tar.gz --file ./restore.tar.gz
-oci os object delete --profile bucket-client -bn bucket-free --name backups/2026-09-28.tar.gz
-
-# Whole directories
-oci os object bulk-upload   --profile bucket-client -bn bucket-free --src-dir ./photos --prefix photos/
-oci os object bulk-download --profile bucket-client -bn bucket-free --download-dir ./restore --prefix photos/
-oci os object sync          --profile bucket-client -bn bucket-free --src-dir ./photos --prefix photos/
-
-# Bucket details (approximate size and object count)
-oci os bucket get --profile bucket-client -bn bucket-free --fields approximateSize --fields approximateCount
-```
-
-To avoid repeating `--profile`, set `OCI_CLI_PROFILE=bucket-client` in the shell (PowerShell: `$env:OCI_CLI_PROFILE = "bucket-client"`). The policy gives this user access to this one bucket only, so `oci os bucket list` returns `NotAuthorizedOrNotFound`. That's expected; always address the bucket directly with `-bn`.
-
-rclone can use the same profile through its native Oracle backend. Add this to `rclone.conf` (`rclone config file` shows where it is):
-
-```ini
-[oci-bucket]
-type           = oracleobjectstorage
-provider       = user_principal_auth
-namespace      = <object_storage_namespace>
-compartment    = <compartment_id>
-region         = <region>
-config_file    = ~/.oci/config
-config_profile = bucket-client
-```
-
-Then, for example: `rclone sync ./photos oci-bucket:bucket-free/photos` or `rclone ls oci-bucket:bucket-free`.
-
-Some tools speak only S3, for example restic, most NAS backup apps, and `aws s3`. For those, create a **Customer Secret Key** by hand for this user: Identity → Users → `bucket-free-client` → **Customer secret keys**. Then point the tool at the `bucket_s3_endpoint` output. This key is deliberately *not* managed by OpenTofu, because its secret would be stored in plaintext in the state file. The policy above already covers it, and a user can have at most two of these keys.
-
-## 10. `outputs.tf`
+## 9. `outputs.tf`
 
 What `tofu apply` prints when it finishes (and what `tofu output` replays later).
 
@@ -320,14 +201,9 @@ What `tofu apply` prints when it finishes (and what `tofu output` replays later)
 | `instance_public_ip` | The reserved public IPv4 |
 | `instance_private_ip` | The instance's private IP inside the subnet |
 | `instance_public_ipv6` | The reserved IPv6 address |
-| `object_storage_namespace` | The tenancy's Object Storage namespace |
-| `bucket_name` | The bucket's name |
-| `state_bucket_name` | The state bucket's name, for `backend.tf` |
-| `bucket_s3_endpoint` | `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, for S3-compatible tools |
-| `bucket_client_user_ocid` | The bucket client user's OCID, or `"bucket client access not enabled"` |
 | `fqdn` | `<instance>.subnetfree.vcnfree.oraclevcn.com`, the instance's name inside the VCN |
 
-## 11. `terraform.tfvars`
+## 10. `terraform.tfvars`
 
 ```hcl
 tenancy_ocid         = "ocid1.tenancy.oc1..your-tenancy-ocid"
@@ -340,7 +216,7 @@ region               = "sa-saopaulo-1"
 
 Add `terraform.tfvars` to `.gitignore` - it now holds your private key path and account identifiers alongside everything else.
 
-## 12. Running it
+## 11. Running it
 
 ```bash
 tofu init    # downloads the OCI provider
@@ -356,7 +232,7 @@ tofu destroy
 
 OpenTofu figures out the correct dependency order automatically (subnet → IGW → route table → security list → VCN, in reverse of creation).
 
-### 12.1. Migrating existing Terraform state to OpenTofu
+### 11.1. Migrating existing Terraform state to OpenTofu
 
 If you already deployed this stack with Terraform, OpenTofu can take over the existing local `terraform.tfstate`. Back it up first, because once `tofu apply` writes the state, you shouldn't go back to Terraform with it:
 
@@ -375,15 +251,13 @@ If you kept an older `.terraform.lock.hcl` that lists `registry.terraform.io/ora
 tofu state replace-provider registry.terraform.io/oracle/oci registry.opentofu.org/oracle/oci
 ```
 
-If you use the remote backend from section 15 with Terraform's native `oci` backend, switch it to the `s3` backend described there. OpenTofu doesn't have an `oci` backend. Move the state back to local with Terraform first (`terraform init -migrate-state` after deleting `backend.tf`), then follow this section and section 15.
-
 The committed `.terraform.lock.hcl` already pins `registry.opentofu.org/oracle/oci` with hashes for Linux, macOS (Apple silicon), and Windows. If you bump the provider, refresh the hashes for all three:
 
 ```bash
 tofu providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=windows_amd64
 ```
 
-## 13. Adopting an already-existing VM instead of creating a new one
+## 12. Adopting an already-existing VM instead of creating a new one
 
 If you already created the VCN/subnet/instance some other way (e.g. by hand in the console, or with separate scripts) **before** running `tofu apply` for the first time, don't just run `apply` - OpenTofu has no record of those resources yet, so `plan` will propose creating everything from scratch. Applying that as-is risks a duplicate instance, a `hostname_label` conflict in the subnet, or - since Always Free Ampere A1 is capped at 2 OCPU/12GB **total** - pushing you over the free-tier quota if your existing VM is already using it.
 
@@ -397,8 +271,6 @@ tofu import oci_core_security_list.this [existing-security-list-ocid]
 tofu import oci_core_subnet.this [existing-subnet-ocid]
 tofu import oci_core_instance.this [existing-instance-ocid]
 tofu import oci_core_public_ip.reserved_ipv4 [existing-reserved-ip-ocid]      # only if you already have a reserved IP
-tofu import oci_objectstorage_bucket.this n/[namespace]/b/[bucket-name]       # only if the bucket already exists
-tofu import oci_objectstorage_bucket.state n/[namespace]/b/[state-bucket-name] # only if the state bucket already exists
 ```
 
 Find each OCID either in the console (each resource's details page) or via the CLI, e.g.:
@@ -417,19 +289,9 @@ oci network subnet list --compartment-id [compartment-ocid] --vcn-id [vcn-ocid] 
 oci compute instance list --compartment-id [compartment-ocid] --query 'data[].{Name:"display-name", OCID:id, State:"lifecycle-state"}' --output table
 
 oci network public-ip list --compartment-id [compartment-ocid] --scope REGION --query 'data[].{IP:"ip-address", Lifetime:lifetime, OCID:id}' --output table
-
-oci os ns get
-
-oci os bucket list --compartment-id [compartment-ocid] --query 'data[].{Name:name, Created:"time-created"}' --output table
 ```
 
 The internet gateway, route table, security list, and subnet commands all need `--vcn-id`, so grab the VCN's OCID from the first command before running the rest.
-
-**The bucket is the one exception to importing by OCID.** Its import ID is `n/[namespace]/b/[bucket-name]`, built from the output of the last two commands: `oci os ns get` prints the namespace, and `oci os bucket list` shows the bucket names. Set `bucket_name` to match the existing bucket before importing. `access_type` and `versioning` are fixed in `storage.tf`, so check how the existing bucket differs from them before you `apply`:
-
-- **`access_type`** - a mismatch is changed in place.
-- **`storage_tier`** - not set in `storage.tf`, so an imported bucket keeps whatever tier it has (it can't be changed after creation anyway). New buckets get `Standard`.
-- **`versioning`** - a bucket that has ever had versioning enabled can only be `Suspended`, never `Disabled` again, so applying `Disabled` fails. For such a bucket, set `versioning = "Suspended"` in `storage.tf`. This stops new versions from being kept, but the previous versions already stored remain and still count toward the 20 GB until you delete them.
 
 **Skip the `oci_core_public_ip` import** if you haven't reserved an IPv4 yet - OpenTofu will create one fresh on `apply` instead. Importing is only for adopting one that already exists (e.g. if you ran a reservation step outside OpenTofu earlier); if you skip it while one already exists, `plan` will propose creating a second reserved IP.
 
@@ -451,7 +313,7 @@ A few things likely to need adjusting after import:
 
 The image data source (`data.oci_core_images.ubuntu_aarch64`) never needs importing — it's a lookup, not a managed resource. Note that it always resolves to the *newest* matching image, which is exactly why the `lifecycle.ignore_changes` block in section 8's `compute.tf` exists — without it, OpenTofu would try to replace your instance the moment a newer Ubuntu 24.04 aarch64 image gets published.
 
-## 14. The "Out of capacity" problem
+## 13. The "Out of capacity" problem
 
 Ampere A1 is in high demand, and `tofu apply` fails immediately on `Out of capacity` errors - it does **not** retry automatically. A couple of ways to handle it:
 
@@ -473,114 +335,6 @@ done
 tofu apply -auto-approve   # picks up the rest (reserved IP, etc.)
 ```
 
-## 15. State file - a word of caution
+## 14. State file - a word of caution
 
-`terraform.tfstate` will contain sensitive details about your infrastructure (OCIDs, IPs, etc.) in plain text. Keep it out of git (`echo "*.tfstate*" >> .gitignore`). To run OpenTofu from more than one machine, or simply not lose the state with your laptop, move it into the `bucket-free-state` bucket that `storage.tf` creates.
-
-The bucket has to exist before OpenTofu can store state in it, so this is a two-step process: run `tofu apply` once with local state as usual (sections 12-13), then switch backends.
-
-OpenTofu has no native `oci` backend (Terraform 1.12+ has one, OpenTofu doesn't), so this uses OpenTofu's `s3` backend pointed at OCI's [Amazon S3 Compatibility API](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm). It needs **OpenTofu 1.10 or newer** for lock files in the bucket.
-
-### 15.1. Create a Customer Secret Key for your own user
-
-The S3 API doesn't accept API signing keys. It authenticates with a **Customer Secret Key**, an access key / secret key pair. Create one for **your own admin user**: Profile → My profile → **Customer secret keys** → **Generate secret key**. Copy the secret right away, because the console shows it only once. The access key appears in the list afterwards.
-
-Don't use the `bucket-free-client` user from section 9. Its policy covers only the data bucket, on purpose, so it can't read or write state. Like that user's keys, this one is created by hand rather than in `storage.tf`, so the secret never lands in the state file it protects. A user can have at most two Customer Secret Keys.
-
-The S3 API only sees buckets in the tenancy's designated S3 compartment, which is the root compartment unless you changed it (Tenancy details → **Edit Object Storage settings**). With `compartment_id` set to the tenancy OCID, as in section 11, `bucket-free-state` is already there.
-
-### 15.2. Configure the backend
-
-Create `backend.tf` next to the other `.tf` files:
-
-```hcl
-terraform {
-  backend "s3" {
-    bucket = "bucket-free-state"
-    key    = "terraform.tfstate"
-
-    # OCI's S3 Compatibility API isn't AWS: path-style URLs only, no AWS account
-    # or metadata service, and no support for the newer checksum headers
-    use_path_style              = true
-    skip_credentials_validation = true
-    skip_region_validation      = true
-    skip_requesting_account_id  = true
-    skip_metadata_api_check     = true
-    skip_s3_checksum            = true
-
-    use_lockfile = true # see the locking caveat below
-  }
-}
-```
-
-Backend blocks can't read variables, so the account-specific settings go in `oci.tfbackend`, which is in `.gitignore`. Take `<namespace>` from the `object_storage_namespace` output (the `bucket_s3_endpoint` output is the full endpoint URL) and the region from `terraform.tfvars`:
-
-```hcl
-region     = "sa-saopaulo-1"
-endpoints  = { s3 = "https://<namespace>.compat.objectstorage.sa-saopaulo-1.oraclecloud.com" }
-access_key = "<customer-secret-key-access-key>"
-secret_key = "<customer-secret-key-secret>"
-```
-
-If you'd rather not keep the secret in a file, leave out `access_key` and `secret_key` and export `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` before running `tofu`. Either way, `tofu init` caches the backend settings it was given in `.terraform/`, which is also in `.gitignore`.
-
-**Locking caveat:** `use_lockfile` creates `terraform.tfstate.tflock` next to the state with a conditional write (`If-None-Match`). OCI doesn't document support for conditional writes on its S3 API, so don't assume the lock actually protects you. Treat the state as single-writer: never run two `apply`s at once. To check, start a `tofu apply` and, while it waits at the confirmation prompt, run `tofu plan` from another terminal. If the second command reports that the state is locked, locking works.
-
-### 15.3. Migrate the state
-
-Then migrate the existing state into the bucket:
-
-```bash
-tofu init -backend-config=oci.tfbackend -migrate-state
-```
-
-`-migrate-state` copies the local state into the bucket automatically; only if it prompts about migrating workspace state (it doesn't for the single default workspace) answer `yes`, or add `-force-copy` to pre-answer it - that also keeps the command safe to run non-interactively. Run `tofu plan` afterwards: it should report no changes. Once it does, delete the local `terraform.tfstate` and `terraform.tfstate.backup`. On any other machine, copy `backend.tf` and `oci.tfbackend` and run `tofu init -backend-config=oci.tfbackend` - no `-migrate-state` needed when there's no existing local state (passing it would be harmless).
-
-To roll back to an earlier state, list the versions with `oci os object list-object-versions -bn bucket-free-state --prefix terraform.tfstate` and download one with `oci os object get -bn bucket-free-state --name terraform.tfstate --version-id [id] --file terraform.tfstate.restored`. Don't write it straight to `terraform.tfstate` - restore it through the backend (e.g. `tofu state push terraform.tfstate.restored`) rather than uploading it over the live state object, so the version history stays intact.
-
-**Before `tofu destroy`**, move the state back to local first. Otherwise destroy removes everything else and then fails on the state bucket, which still holds the state:
-
-```bash
-# delete or rename backend.tf, then:
-tofu init -migrate-state
-tofu destroy
-```
-
-Even with local state, destroy can only delete `bucket-free-state` once it's empty, including old object versions. Empty it in the console first (Buckets → `bucket-free-state` → Objects, with **Show deleted objects** on).
-
-### 15.4. Optional: encrypt the state
-
-OpenTofu can encrypt state and plan files client-side, so neither the local `terraform.tfstate` nor the copy in the bucket is readable without a passphrase. It's opt-in. Create `encryption.tf`:
-
-```hcl
-variable "state_passphrase" {
-  type      = string
-  sensitive = true
-}
-
-terraform {
-  encryption {
-    key_provider "pbkdf2" "main" {
-      passphrase = var.state_passphrase # at least 16 characters
-    }
-    method "aes_gcm" "main" {
-      keys = key_provider.pbkdf2.main
-    }
-    method "unencrypted" "migrate" {}
-
-    state {
-      method = method.aes_gcm.main
-      fallback {
-        method = method.unencrypted.migrate # lets tofu read the existing plaintext state once
-      }
-    }
-    plan {
-      method = method.aes_gcm.main
-    }
-  }
-}
-```
-
-`tofu` prints a warning about the `unencrypted` method while it's configured; that's expected during the migration. Supply the passphrase through the environment rather than `terraform.tfvars`, for example `export TF_VAR_state_passphrase='...'`, and keep it in your password manager. Run `tofu apply` once so the state is rewritten encrypted, then delete the `fallback` block and the `unencrypted` method so a plaintext state is never accepted again.
-
-**Losing the passphrase means losing the state.** OCI can't recover it, and the bucket's old versions written after the switch are encrypted too. Encrypted state also can't be read by Terraform or by tools that parse state files.
+`terraform.tfstate` will contain sensitive details about your infrastructure (OCIDs, IPs, etc.) in plain text. Keep it out of git (`echo "*.tfstate*" >> .gitignore`). The state lives only on the machine you run OpenTofu from, so back it up somewhere safe: losing it means OpenTofu no longer knows what it created, and you'd have to re-import everything (section 12).
